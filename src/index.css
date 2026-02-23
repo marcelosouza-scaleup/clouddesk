@@ -1,96 +1,114 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
-All colors MUST be HSL.
-*/
-
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
-
+    --background: 230 25% 95%;
+    --foreground: 230 25% 10%;
     --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
-
+    --card-foreground: 230 25% 10%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
-
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
-
+    --popover-foreground: 230 25% 10%;
+    --primary: 238 70% 60%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 230 20% 90%;
+    --secondary-foreground: 230 25% 15%;
+    --muted: 230 15% 92%;
+    --muted-foreground: 230 10% 45%;
+    --accent: 238 70% 60%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 230 15% 88%;
+    --input: 230 15% 88%;
+    --ring: 238 70% 60%;
     --radius: 0.5rem;
+    
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 230 15% 30%;
+    --sidebar-primary: 238 70% 60%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 238 60% 96%;
+    --sidebar-accent-foreground: 238 70% 50%;
+    --sidebar-border: 230 15% 90%;
+    --sidebar-ring: 238 70% 60%;
 
-    --sidebar-background: 0 0% 98%;
-
-    --sidebar-foreground: 240 5.3% 26.1%;
-
-    --sidebar-primary: 240 5.9% 10%;
-
-    --sidebar-primary-foreground: 0 0% 98%;
-
-    --sidebar-accent: 240 4.8% 95.9%;
-
-    --sidebar-accent-foreground: 240 5.9% 10%;
-
-    --sidebar-border: 220 13% 91%;
-
-    --sidebar-ring: 217.2 91.2% 59.8%;
+    /* CloudDesk custom tokens */
+    --surface: 230 20% 97%;
+    --surface-hover: 230 20% 94%;
+    --bubble-contact: 230 15% 92%;
+    --bubble-contact-foreground: 230 25% 15%;
+    --bubble-agent: 238 70% 60%;
+    --bubble-agent-foreground: 0 0% 100%;
+    --bubble-bot: 260 50% 55%;
+    --bubble-bot-foreground: 0 0% 100%;
+    --bubble-note: 45 90% 92%;
+    --bubble-note-foreground: 40 40% 25%;
+    --bubble-system: 230 15% 85%;
+    --bubble-system-foreground: 230 10% 40%;
+    --online: 142 70% 45%;
+    --away: 38 92% 55%;
+    --offline: 230 10% 60%;
+    --urgent: 0 72% 55%;
+    --high: 25 95% 55%;
+    --medium: 38 92% 55%;
+    --low: 200 60% 50%;
+    --unread-badge: 238 70% 60%;
   }
 
   .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-
-    --primary: 210 40% 98%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 212.7 26.8% 83.9%;
-    --sidebar-background: 240 5.9% 10%;
-    --sidebar-foreground: 240 4.8% 95.9%;
-    --sidebar-primary: 224.3 76.3% 48%;
+    --background: 232 30% 8%;
+    --foreground: 220 15% 90%;
+    --card: 232 28% 12%;
+    --card-foreground: 220 15% 90%;
+    --popover: 232 28% 14%;
+    --popover-foreground: 220 15% 90%;
+    --primary: 238 70% 65%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 232 25% 18%;
+    --secondary-foreground: 220 15% 85%;
+    --muted: 232 20% 16%;
+    --muted-foreground: 220 10% 55%;
+    --accent: 238 70% 65%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 62% 50%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 232 20% 18%;
+    --input: 232 20% 20%;
+    --ring: 238 70% 65%;
+    
+    --sidebar-background: 232 30% 10%;
+    --sidebar-foreground: 220 10% 70%;
+    --sidebar-primary: 238 70% 65%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 240 3.7% 15.9%;
-    --sidebar-accent-foreground: 240 4.8% 95.9%;
-    --sidebar-border: 240 3.7% 15.9%;
-    --sidebar-ring: 217.2 91.2% 59.8%;
+    --sidebar-accent: 238 50% 18%;
+    --sidebar-accent-foreground: 238 70% 80%;
+    --sidebar-border: 232 20% 16%;
+    --sidebar-ring: 238 70% 65%;
+
+    --surface: 232 28% 10%;
+    --surface-hover: 232 25% 14%;
+    --bubble-contact: 232 25% 18%;
+    --bubble-contact-foreground: 220 15% 88%;
+    --bubble-agent: 238 70% 55%;
+    --bubble-agent-foreground: 0 0% 100%;
+    --bubble-bot: 260 50% 50%;
+    --bubble-bot-foreground: 0 0% 100%;
+    --bubble-note: 45 60% 18%;
+    --bubble-note-foreground: 45 40% 85%;
+    --bubble-system: 232 20% 20%;
+    --bubble-system-foreground: 220 10% 55%;
+    --online: 142 60% 50%;
+    --away: 38 80% 55%;
+    --offline: 220 10% 40%;
+    --urgent: 0 65% 55%;
+    --high: 25 85% 55%;
+    --medium: 38 80% 55%;
+    --low: 200 55% 50%;
+    --unread-badge: 238 70% 65%;
   }
 }
 
@@ -98,8 +116,26 @@ All colors MUST be HSL.
   * {
     @apply border-border;
   }
-
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground font-sans antialiased;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+}
+
+/* Custom scrollbar */
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--border));
+    border-radius: 3px;
   }
 }
