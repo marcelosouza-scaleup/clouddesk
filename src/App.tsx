@@ -14,6 +14,7 @@ import Knowledge from "./pages/Knowledge";
 import MacrosPage from "./pages/Macros";
 import SettingsPage from "./pages/Settings";
 import NotFound from "./pages/NotFound";
+import WidgetPreview from "./pages/WidgetPreview";
 import { DashboardLayout } from "./components/dashboard/DashboardLayout";
 
 const queryClient = new QueryClient();
@@ -64,19 +65,24 @@ const App = () => {
         <Toaster />
         <Sonner />
         <BrowserRouter>
-          <AuthGate>
-            <Routes>
-              <Route path="/" element={<Navigate to="/inbox" replace />} />
-              <Route element={<DashboardLayout />}>
-                <Route path="/inbox" element={<Inbox />} />
-                <Route path="/contacts" element={<Contacts />} />
-                <Route path="/knowledge" element={<Knowledge />} />
-                <Route path="/macros" element={<MacrosPage />} />
-                <Route path="/settings" element={<SettingsPage />} />
-              </Route>
-              <Route path="*" element={<NotFound />} />
-            </Routes>
-          </AuthGate>
+          <Routes>
+            <Route path="/widget-preview" element={<WidgetPreview />} />
+            <Route path="*" element={
+              <AuthGate>
+                <Routes>
+                  <Route path="/" element={<Navigate to="/inbox" replace />} />
+                  <Route element={<DashboardLayout />}>
+                    <Route path="/inbox" element={<Inbox />} />
+                    <Route path="/contacts" element={<Contacts />} />
+                    <Route path="/knowledge" element={<Knowledge />} />
+                    <Route path="/macros" element={<MacrosPage />} />
+                    <Route path="/settings" element={<SettingsPage />} />
+                  </Route>
+                  <Route path="*" element={<NotFound />} />
+                </Routes>
+              </AuthGate>
+            } />
+          </Routes>
         </BrowserRouter>
       </TooltipProvider>
     </QueryClientProvider>
