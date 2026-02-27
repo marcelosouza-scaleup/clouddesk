@@ -14,6 +14,45 @@ export type Database = {
   }
   public: {
     Tables: {
+      account: {
+        Row: {
+          created_at: string | null
+          email: string
+          has_password: boolean | null
+          has_purchase: boolean | null
+          id: string
+          name: string
+          phone: string | null
+          stripe_customer_id: string | null
+          updated_at: string | null
+          user_id: string
+        }
+        Insert: {
+          created_at?: string | null
+          email: string
+          has_password?: boolean | null
+          has_purchase?: boolean | null
+          id?: string
+          name: string
+          phone?: string | null
+          stripe_customer_id?: string | null
+          updated_at?: string | null
+          user_id: string
+        }
+        Update: {
+          created_at?: string | null
+          email?: string
+          has_password?: boolean | null
+          has_purchase?: boolean | null
+          id?: string
+          name?: string
+          phone?: string | null
+          stripe_customer_id?: string | null
+          updated_at?: string | null
+          user_id?: string
+        }
+        Relationships: []
+      }
       activity_log: {
         Row: {
           action: string
