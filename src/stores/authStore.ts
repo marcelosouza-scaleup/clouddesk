@@ -24,31 +24,31 @@ interface AuthState {
   updateStatus: (status: string) => Promise<void>;
 }
 
+const MOCK_AGENT: Agent = {
+  id: "00000000-0000-0000-0000-000000000002",
+  org_id: "cloudfy",
+  name: "Admin",
+  email: "admin@cloudfy.host",
+  avatar_url: null,
+  role: "admin",
+  status: "online",
+};
+
 export const useAuthStore = create<AuthState>((set, get) => ({
-  user: null,
-  agent: null,
-  loading: true,
+  user: { id: "00000000-0000-0000-0000-000000000002", email: "admin@cloudfy.host" } as User,
+  agent: MOCK_AGENT,
+  loading: false,
   setUser: (user) => set({ user }),
   setAgent: (agent) => set({ agent }),
   setLoading: (loading) => set({ loading }),
   fetchAgent: async () => {
-    const { user } = get();
-    if (!user) return;
-    const { data } = await supabase
-      .from("agents")
-      .select("*")
-      .eq("id", user.id)
-      .single();
-    if (data) set({ agent: data as Agent });
+    // No-op during dev mode — agent is mocked
   },
   signOut: async () => {
     await supabase.auth.signOut();
     set({ user: null, agent: null });
   },
   updateStatus: async (status) => {
-    const { user } = get();
-    if (!user) return;
-    await supabase.from("agents").update({ status }).eq("id", user.id);
     set((s) => ({ agent: s.agent ? { ...s.agent, status } : null }));
   },
 }));

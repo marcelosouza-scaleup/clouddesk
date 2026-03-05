@@ -1,12 +1,12 @@
-import { useChatStore } from "@/stores/chatStore";
+import { useInboxStore } from "@/stores/useInboxStore";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { User, Mail, Globe, Clock, Tag, MessageSquare } from "lucide-react";
+import { User, Mail, Phone, Tag } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 
 export function ConversationDetails() {
-  const { activeConversationId, conversations } = useChatStore();
+  const { activeConversationId, conversations } = useInboxStore();
   const conversation = conversations.find((c) => c.id === activeConversationId);
 
   if (!conversation) return null;
@@ -26,6 +26,11 @@ export function ConversationDetails() {
           {contact?.email && (
             <p className="text-xs text-muted-foreground flex items-center gap-1 mt-1">
               <Mail className="h-3 w-3" /> {contact.email}
+            </p>
+          )}
+          {contact?.phone && (
+            <p className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5">
+              <Phone className="h-3 w-3" /> {contact.phone}
             </p>
           )}
         </div>

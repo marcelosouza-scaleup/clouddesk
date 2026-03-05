@@ -2,17 +2,18 @@ import { create } from "zustand";
 
 export interface Conversation {
   id: string;
-  org_id: string;
-  contact_id: string;
+  account_user_id: string;
   assigned_agent_id: string | null;
-  team: string;
   channel: string;
   status: string;
   priority: string;
   subject: string | null;
+  ai_active: boolean;
+  sla_deadline: string | null;
   created_at: string;
   updated_at: string;
-  contact?: { id: string; name: string | null; email: string | null; avatar_url: string | null };
+  // Joined from account table
+  contact?: { user_id: string; name: string | null; email: string | null; phone: string | null };
   last_message?: { content: string; created_at: string; sender_type: string };
   unread_count?: number;
   tags?: { id: string; name: string; color: string }[];

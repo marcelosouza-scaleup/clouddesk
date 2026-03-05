@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
-import { useChatStore } from "@/stores/chatStore";
+import { useInboxStore } from "@/stores/useInboxStore";
 
 const navItems = [
   { title: "Inbox", url: "/inbox", icon: Inbox },
@@ -25,8 +25,8 @@ const statusColors: Record<string, string> = {
 export function AppSidebar() {
   const { agent, signOut, updateStatus } = useAuthStore();
   const { theme, toggleTheme } = useTheme();
-  const conversations = useChatStore((s) => s.conversations);
-  const openCount = conversations.filter((c) => c.status === "open").length;
+  const { conversations, activeTab } = useInboxStore();
+  const openCount = activeTab === "open" ? conversations.length : 0;
 
   const initials = agent?.name?.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase() || "?";
 

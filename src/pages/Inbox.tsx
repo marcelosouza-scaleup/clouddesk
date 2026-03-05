@@ -1,15 +1,20 @@
-import { ConversationList } from "@/components/dashboard/ConversationList";
-import { ChatThread } from "@/components/dashboard/ChatThread";
-import { ConversationDetails } from "@/components/dashboard/ConversationDetails";
-import { useChatStore } from "@/stores/chatStore";
+import { ConversationList } from "@/components/inbox/ConversationList";
+import { ConversationThread } from "@/components/inbox/ConversationThread";
+import { ConversationDetails } from "@/components/inbox/ConversationDetails";
+import { useInboxStore } from "@/stores/useInboxStore";
 
 export default function Inbox() {
-  const activeId = useChatStore((s) => s.activeConversationId);
+  const activeId = useInboxStore((s) => s.activeConversationId);
 
   return (
-    <div className="flex h-full w-full">
+    <div className="flex h-full w-full overflow-hidden">
+      {/* Col 1 — Conversation list (320px, 4 tabs) */}
       <ConversationList />
-      <ChatThread />
+
+      {/* Col 2 — Thread + composer */}
+      <ConversationThread />
+
+      {/* Col 3 — Details panel (only when a conversation is selected) */}
       {activeId && <ConversationDetails />}
     </div>
   );

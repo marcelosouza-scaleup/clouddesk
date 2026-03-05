@@ -31,7 +31,7 @@ export function ChatThread() {
       .channel(`messages-${activeConversationId}`)
       .on(
         "postgres_changes",
-        { event: "INSERT", schema: "public", table: "messages", filter: `conversation_id=eq.${activeConversationId}` },
+        { event: "INSERT", schema: "public", table: "desk_messages", filter: `conversation_id=eq.${activeConversationId}` },
         (payload) => {
           const msg = payload.new as Message;
           useChatStore.getState().addMessage(msg);
@@ -48,7 +48,7 @@ export function ChatThread() {
 
   const loadMessages = async () => {
     const { data } = await supabase
-      .from("messages")
+      .from("desk_messages")
       .select("*")
       .eq("conversation_id", activeConversationId!)
       .order("created_at", { ascending: true });
@@ -57,12 +57,12 @@ export function ChatThread() {
 
   const handleResolve = async () => {
     if (!activeConversationId) return;
-    await supabase.from("conversations").update({ status: "resolved", resolved_at: new Date().toISOString() }).eq("id", activeConversationId);
+    await supabase.from("desk_conversations").update({ status: "resolved", resolved_at: new Date().toISOString() }).eq("id", activeConversationId);
   };
 
   const handleChangePriority = async (priority: string) => {
     if (!activeConversationId) return;
-    await supabase.from("conversations").update({ priority }).eq("id", activeConversationId);
+    await supabase.from("desk_conversations").update({ priority }).eq("id", activeConversationId);
   };
 
   if (!activeConversationId || !conversation) {

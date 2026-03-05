@@ -27,7 +27,7 @@ export function MessageComposer({ conversationId }: Props) {
     setSending(true);
 
     try {
-      const { error } = await supabase.from("messages").insert({
+      const { error } = await supabase.from("desk_messages").insert({
         conversation_id: conversationId,
         sender_type: "agent",
         sender_id: agent.id,
@@ -39,7 +39,7 @@ export function MessageComposer({ conversationId }: Props) {
       if (error) throw error;
 
       // Update conversation timestamp
-      await supabase.from("conversations").update({ updated_at: new Date().toISOString() }).eq("id", conversationId);
+      await supabase.from("desk_conversations").update({ updated_at: new Date().toISOString() }).eq("id", conversationId);
 
       setContent("");
       setIsNote(false);

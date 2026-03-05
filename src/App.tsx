@@ -1,13 +1,9 @@
-import { useEffect } from "react";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
-import { useAuthStore } from "@/stores/authStore";
 import { useTheme } from "@/lib/theme";
-import Login from "./pages/Login";
 import Inbox from "./pages/Inbox";
 import Contacts from "./pages/Contacts";
 import Knowledge from "./pages/Knowledge";
@@ -19,40 +15,8 @@ import { DashboardLayout } from "./components/dashboard/DashboardLayout";
 
 const queryClient = new QueryClient();
 
+// DEV MODE: AuthGate bypassed — mock user active via authStore
 function AuthGate({ children }: { children: React.ReactNode }) {
-  const { user, loading, setUser, setLoading, fetchAgent } = useAuthStore();
-
-  useEffect(() => {
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
-      setLoading(false);
-      if (session?.user) {
-        setTimeout(() => fetchAgent(), 0);
-      }
-    });
-
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
-      setLoading(false);
-      if (session?.user) fetchAgent();
-    });
-
-    return () => subscription.unsubscribe();
-  }, []);
-
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="flex items-center gap-2 text-muted-foreground">
-          <div className="h-5 w-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-          <span className="text-sm">Carregando...</span>
-        </div>
-      </div>
-    );
-  }
-
-  if (!user) return <Login />;
-
   return <>{children}</>;
 }
 

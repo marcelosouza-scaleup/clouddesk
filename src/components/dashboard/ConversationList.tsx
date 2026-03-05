@@ -1,9 +1,8 @@
-import { useEffect } from "react";
+import { useEffect, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useChatStore, type Conversation } from "@/stores/chatStore";
 import { useAuthStore } from "@/stores/authStore";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Search, MessageSquare, Mail, Bot, User } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
@@ -21,54 +20,95 @@ const channelIcon: Record<string, typeof MessageSquare> = {
   email: Mail,
 };
 
+// Enrich a raw desk_conversations row with account data and last message
+async function enrichConversation(conv: Record<string, unknown>): Promise<Conversation> {
+  const accountUserId = conv.account_user_id as string;
+
+  const [accountResult, msgResult] = await Promise.all([
+    supabase
+      .from("account")
+      .select("user_id, name, email, phone")
+      .eq("user_id", accountUserId)
+      .maybeSingle(),
+    supabase
+      .from("desk_messages")
+      .select("content, created_at, sender_type")
+      .eq("conversation_id", conv.id as string)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+  ]);
+
+  return {
+    ...(conv as unknown as Conversation),
+    contact: accountResult.data ?? undefined,
+    last_message: msgResult.data ?? undefined,
+  };
+}
+
 export function ConversationList() {
-  const { conversations, setConversations, activeConversationId, setActiveConversationId, statusTab, setStatusTab, searchQuery, setSearchQuery } = useChatStore();
+  const { conversations, setConversations, activeConversationId, setActiveConversationId, statusTab, setStatusTab, searchQuery, setSearchQuery } =
+    useChatStore();
   const agent = useAuthStore((s) => s.agent);
+
+  const loadConversations = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("desk_conversations")
+      .select("*")
+      .eq("status", statusTab)
+      .order("updated_at", { ascending: false })
+      .limit(100);
+
+    if (error || !data) return;
+
+    const enriched = await Promise.all(data.map((c) => enrichConversation(c as Record<string, unknown>)));
+    setConversations(enriched);
+  }, [statusTab, setConversations]);
 
   useEffect(() => {
     if (!agent) return;
     loadConversations();
 
     const channel = supabase
-      .channel("conversations-changes")
-      .on("postgres_changes", { event: "*", schema: "public", table: "conversations" }, () => {
-        loadConversations();
-      })
+      .channel("desk-conversations-realtime")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "desk_conversations" },
+        async (payload) => {
+          const newConv = await enrichConversation(payload.new as Record<string, unknown>);
+          // Only add to list if it matches the current tab
+          if (newConv.status === statusTab) {
+            useChatStore.setState((s) => ({
+              conversations: [newConv, ...s.conversations],
+            }));
+          }
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "desk_conversations" },
+        async (payload) => {
+          const updated = payload.new as Record<string, unknown>;
+          // If status changed away from current tab, remove from list
+          if (updated.status !== statusTab) {
+            useChatStore.setState((s) => ({
+              conversations: s.conversations.filter((c) => c.id !== updated.id),
+            }));
+            return;
+          }
+          // Otherwise, update the entry in-place
+          const enriched = await enrichConversation(updated);
+          useChatStore.setState((s) => ({
+            conversations: s.conversations.map((c) => (c.id === enriched.id ? enriched : c)),
+          }));
+        }
+      )
       .subscribe();
 
-    return () => { supabase.removeChannel(channel); };
-  }, [agent, statusTab]);
-
-  const loadConversations = async () => {
-    if (!agent) return;
-    const { data } = await supabase
-      .from("conversations")
-      .select("*, contacts(id, name, email, avatar_url)")
-      .eq("status", statusTab)
-      .order("updated_at", { ascending: false })
-      .limit(100);
-
-    if (data) {
-      // Fetch last message for each conversation
-      const convosWithMessages = await Promise.all(
-        data.map(async (conv: any) => {
-          const { data: msgs } = await supabase
-            .from("messages")
-            .select("content, created_at, sender_type")
-            .eq("conversation_id", conv.id)
-            .order("created_at", { ascending: false })
-            .limit(1);
-
-          return {
-            ...conv,
-            contact: conv.contacts,
-            last_message: msgs?.[0] || null,
-          } as Conversation;
-        })
-      );
-      setConversations(convosWithMessages);
-    }
-  };
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [agent, statusTab, loadConversations]);
 
   const filtered = conversations.filter((c) => {
     if (!searchQuery) return true;
