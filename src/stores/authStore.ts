@@ -4,7 +4,6 @@ import type { User } from "@supabase/supabase-js";
 
 interface Agent {
   id: string;
-  org_id: string;
   name: string;
   email: string;
   avatar_url: string | null;
@@ -19,36 +18,52 @@ interface AuthState {
   setUser: (user: User | null) => void;
   setAgent: (agent: Agent | null) => void;
   setLoading: (loading: boolean) => void;
-  fetchAgent: () => Promise<void>;
+  fetchAgent: (authUserId: string) => Promise<Agent | null>;
   signOut: () => Promise<void>;
   updateStatus: (status: string) => Promise<void>;
 }
 
-const MOCK_AGENT: Agent = {
-  id: "00000000-0000-0000-0000-000000000002",
-  org_id: "cloudfy",
-  name: "Admin",
-  email: "admin@cloudfy.host",
-  avatar_url: null,
-  role: "admin",
-  status: "online",
-};
-
 export const useAuthStore = create<AuthState>((set, get) => ({
-  user: { id: "00000000-0000-0000-0000-000000000002", email: "admin@cloudfy.host" } as User,
-  agent: MOCK_AGENT,
-  loading: false,
+  user: null,
+  agent: null,
+  loading: true,
   setUser: (user) => set({ user }),
   setAgent: (agent) => set({ agent }),
   setLoading: (loading) => set({ loading }),
-  fetchAgent: async () => {
-    // No-op during dev mode — agent is mocked
+
+  fetchAgent: async (authUserId: string) => {
+    const { data, error } = await supabase
+      .from("desk_agents")
+      .select("id, name, email, avatar_url, role, status")
+      .eq("auth_user_id", authUserId)
+      .maybeSingle();
+
+    if (error || !data) return null;
+
+    const agent: Agent = {
+      id: data.id,
+      name: data.name,
+      email: data.email,
+      avatar_url: data.avatar_url,
+      role: data.role,
+      status: data.status,
+    };
+    set({ agent });
+    return agent;
   },
+
   signOut: async () => {
     await supabase.auth.signOut();
     set({ user: null, agent: null });
   },
+
   updateStatus: async (status) => {
+    const { agent } = get();
+    if (!agent) return;
     set((s) => ({ agent: s.agent ? { ...s.agent, status } : null }));
+    await supabase
+      .from("desk_agents")
+      .update({ status })
+      .eq("id", agent.id);
   },
 }));

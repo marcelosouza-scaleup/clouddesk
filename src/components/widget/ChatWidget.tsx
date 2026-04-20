@@ -9,66 +9,39 @@ import { ChatWidgetComposer } from "./ChatWidgetComposer";
 import { CSATFeedback } from "./CSATFeedback";
 import type { CloudDeskSettings, WidgetMessage } from "./types";
 
-// Fixed conversation ID for MVP testing
-export const TEST_CONVERSATION_ID = "00000000-0000-0000-0000-000000000001";
+// Fallback account_user_id for unauthenticated widget preview sessions
+const PREVIEW_ACCOUNT_USER_ID = "00000000-0000-0000-0000-000000000001";
 
-const OPENAI_API_KEY = import.meta.env.VITE_OPENAI_API_KEY as string;
+// ── Edge Function call ────────────────────────────────────────────────────────
+// Uses supabase.functions.invoke() so the client handles auth headers correctly
+// regardless of whether the key is a JWT (eyJ...) or publishable key (sb_publishable_...).
 
-const BASE_SYSTEM_PROMPT = `Você é Luna, assistente virtual de suporte da Cloudfy, uma empresa SaaS de infraestrutura.
-Seja profissional, amigável e direta. Use linguagem simples e acessível.
-Responda em português do Brasil. Respostas curtas e objetivas (máximo 3 parágrafos).
-Ao final, pergunte se o cliente precisa de mais ajuda.`;
-
-// ── Knowledge base cache (refreshes every 5 minutes) ──────────────────────────
-
-interface KBArticle { title: string; content: string; }
-let kbCache: { articles: KBArticle[]; fetchedAt: number } | null = null;
-const KB_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-
-async function fetchKnowledgeBase(): Promise<KBArticle[]> {
-  const now = Date.now();
-  if (kbCache && now - kbCache.fetchedAt < KB_CACHE_TTL_MS) {
-    return kbCache.articles;
-  }
-
-  const { data, error } = await supabase
-    .from("desk_knowledge_base")
-    .select("title, content")
-    .eq("is_published", true)
-    .order("updated_at", { ascending: false });
-
-  if (error) {
-    console.error("[Widget] Erro ao buscar base de conhecimento:", error.message);
-    return kbCache?.articles ?? []; // return stale cache on error rather than nothing
-  }
-
-  const articles = (data ?? []) as KBArticle[];
-  kbCache = { articles, fetchedAt: now };
-  return articles;
+interface AIRespondResult {
+  reply: string | null;
+  should_handoff: boolean;
+  blocked?: boolean;
 }
 
-// Keyword the AI must output (and only this) to trigger human handoff
-const TRANSFER_KEYWORD = "[TRANSFERIR]";
+async function callAiEdgeFunction(
+  conversationId: string,
+  message: string,
+  accountName?: string | null,
+): Promise<AIRespondResult> {
+  const { data, error } = await supabase.functions.invoke<AIRespondResult>(
+    "desk-ai-respond",
+    {
+      body: {
+        conversation_id: conversationId,
+        message,
+        account_name: accountName ?? undefined,
+      },
+    },
+  );
 
-function buildSystemPrompt(articles: KBArticle[]): string {
-  const kbSection = articles.length === 0
-    ? "Nenhum artigo disponível no momento."
-    : articles.map((a) => `### ${a.title}\n${a.content}`).join("\n\n---\n\n");
+  if (error) throw new Error(`Edge Function error: ${error.message}`);
+  if (!data) throw new Error("Edge Function returned no data");
 
-  return `${BASE_SYSTEM_PROMPT}
-
----
-
-[REGRA DE TRANSFERÊNCIA — OBRIGATÓRIA]
-Se o cliente pedir explicitamente para falar com um humano, OU se a dúvida dele NÃO puder ser respondida usando EXCLUSIVAMENTE a Base de Conhecimento abaixo, você DEVE responder APENAS com a palavra-chave: ${TRANSFER_KEYWORD}
-Não adicione nenhum texto antes ou depois. Não explique. Só retorne: ${TRANSFER_KEYWORD}
-
----
-
-[BASE DE CONHECIMENTO]
-Utilize SOMENTE os artigos abaixo para responder ao cliente. Não invente informações.
-
-${kbSection}`;
+  return data;
 }
 
 // ── Handoff: escalate conversation to human ───────────────────────────────────
@@ -92,63 +65,6 @@ async function handleHandoff(conversationId: string): Promise<WidgetMessage | nu
 
   // 2. Insert visible system message for the client
   return insertMessage(conversationId, "system", HANDOFF_MESSAGE);
-}
-
-// ── Response interceptor ──────────────────────────────────────────────────────
-
-/**
- * Processes the raw AI response:
- * - If it contains [TRANSFERIR] → triggers handoff, never shows the keyword
- * - Otherwise → inserts normal bot message
- * Returns the message added to the thread (or null on DB error).
- */
-async function processAiResponse(
-  rawText: string,
-  conversationId: string,
-): Promise<{ message: WidgetMessage | null; didHandoff: boolean }> {
-  if (rawText.includes(TRANSFER_KEYWORD)) {
-    const message = await handleHandoff(conversationId);
-    return { message, didHandoff: true };
-  }
-
-  const message = await insertMessage(conversationId, "bot", rawText, true);
-  return { message, didHandoff: false };
-}
-
-async function callOpenAI(userMessage: string, history: WidgetMessage[]): Promise<string> {
-  const kbArticles = await fetchKnowledgeBase();
-  const systemPrompt = buildSystemPrompt(kbArticles);
-
-  const messages = [
-    { role: "system", content: systemPrompt },
-    ...history.slice(-10).map((m) => ({
-      role: m.sender_type === "contact" ? "user" : "assistant",
-      content: m.content,
-    })),
-    { role: "user", content: userMessage },
-  ];
-
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      messages,
-      temperature: 0.7,
-      max_tokens: 512,
-    }),
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`OpenAI error ${res.status}: ${err}`);
-  }
-
-  const data = await res.json();
-  return data.choices[0].message.content as string;
 }
 
 async function insertMessage(
@@ -178,11 +94,19 @@ async function insertMessage(
   return data as WidgetMessage;
 }
 
-interface Props {
-  settings: CloudDeskSettings;
+export interface EmbedUser {
+  id: string;
+  email: string;
+  name: string;
 }
 
-export function ChatWidget({ settings }: Props) {
+interface Props {
+  settings: CloudDeskSettings;
+  /** Populated when running as embedded widget on cloudfy.space */
+  embedUser?: EmbedUser;
+}
+
+export function ChatWidget({ settings, embedUser }: Props) {
   const {
     isOpen,
     account,
@@ -190,38 +114,70 @@ export function ChatWidget({ settings }: Props) {
     messages,
     showCsat,
     isAiResponding,
+    isWaitingForHuman,
     setConversation,
     addMessage,
     setIsAiResponding,
+    setIsWaitingForHuman,
   } = useWidgetStore();
+  // `messages` is used only for rendering — passed down to ChatWidgetThread
 
   const startConversation = useCallback(
     async (firstMessage: string) => {
-      // Set conversation using fixed test ID
-      const conv = {
-        id: TEST_CONVERSATION_ID,
-        status: "open",
-        created_at: new Date().toISOString(),
-        subject: firstMessage.slice(0, 60),
-      };
-      setConversation(conv);
-
       setIsAiResponding(true);
 
       try {
-        // 1. Insert contact message
-        const contactMsg = await insertMessage(TEST_CONVERSATION_ID, "contact", firstMessage);
+        // 1. Create conversation record in desk_conversations
+        const accountUserId = embedUser?.id ?? account?.user_id ?? PREVIEW_ACCOUNT_USER_ID;
+        const { data: convData, error: convError } = await supabase
+          .from("desk_conversations")
+          .insert({
+            account_user_id: accountUserId,
+            channel: "chat",
+            status: "open",
+            priority: "medium",
+            subject: firstMessage.slice(0, 60),
+            ai_active: true,
+          })
+          .select("id, status, created_at, subject")
+          .single();
+
+        if (convError || !convData) {
+          throw new Error(`Erro ao criar conversa: ${convError?.message ?? "sem dados"}`);
+        }
+
+        setConversation({
+          id: convData.id,
+          status: convData.status,
+          created_at: convData.created_at,
+          subject: convData.subject,
+        });
+
+        // 2. Insert contact message
+        const contactMsg = await insertMessage(convData.id, "contact", firstMessage);
         if (contactMsg) addMessage(contactMsg);
 
-        // 2. Call OpenAI → intercept [TRANSFERIR] before any output
-        const aiText = await callOpenAI(firstMessage, []);
-        const { message: responseMsg } = await processAiResponse(aiText, TEST_CONVERSATION_ID);
-        if (responseMsg) addMessage(responseMsg);
+        // 3. Call Edge Function (server-side OpenAI — no CORS, no key in bundle)
+        const aiResult = await callAiEdgeFunction(
+          convData.id,
+          firstMessage,
+          embedUser?.name ?? account?.name,
+        );
+
+        if (aiResult.blocked) {
+          // AI is disabled for this conversation — do nothing
+        } else if (aiResult.should_handoff) {
+          const handoffMsg = await handleHandoff(convData.id);
+          if (handoffMsg) addMessage(handoffMsg);
+        } else if (aiResult.reply) {
+          const botMsg = await insertMessage(convData.id, "bot", aiResult.reply, true);
+          if (botMsg) addMessage(botMsg);
+        }
       } catch (err) {
         console.error("[Widget] Erro no fluxo de IA:", err);
         addMessage({
           id: crypto.randomUUID(),
-          conversation_id: TEST_CONVERSATION_ID,
+          conversation_id: "error",
           sender_type: "bot",
           content: "Desculpe, tive um problema ao processar sua mensagem. Tente novamente.",
           created_at: new Date().toISOString(),
@@ -232,7 +188,7 @@ export function ChatWidget({ settings }: Props) {
         setIsAiResponding(false);
       }
     },
-    [account, addMessage, setConversation, setIsAiResponding]
+    [account, embedUser, addMessage, setConversation, setIsAiResponding]
   );
 
   const handleSend = useCallback(
@@ -249,10 +205,22 @@ export function ChatWidget({ settings }: Props) {
         const contactMsg = await insertMessage(conversation.id, "contact", text);
         if (contactMsg) addMessage(contactMsg);
 
-        // 2. Call OpenAI → intercept [TRANSFERIR] before any output
-        const aiText = await callOpenAI(text, messages);
-        const { message: responseMsg } = await processAiResponse(aiText, conversation.id);
-        if (responseMsg) addMessage(responseMsg);
+        // 2. Call Edge Function (server-side OpenAI — no CORS, no key in bundle)
+        const aiResult = await callAiEdgeFunction(
+          conversation.id,
+          text,
+          embedUser?.name ?? account?.name,
+        );
+
+        if (aiResult.blocked) {
+          // AI is disabled for this conversation — do nothing
+        } else if (aiResult.should_handoff) {
+          const handoffMsg = await handleHandoff(conversation.id);
+          if (handoffMsg) addMessage(handoffMsg);
+        } else if (aiResult.reply) {
+          const botMsg = await insertMessage(conversation.id, "bot", aiResult.reply, true);
+          if (botMsg) addMessage(botMsg);
+        }
       } catch (err) {
         console.error("[Widget] Erro no fluxo de IA:", err);
         const fallback: WidgetMessage = {
@@ -269,8 +237,38 @@ export function ChatWidget({ settings }: Props) {
         setIsAiResponding(false);
       }
     },
-    [conversation, messages, addMessage, setIsAiResponding, startConversation]
+    [account, embedUser, conversation, addMessage, setIsAiResponding, startConversation]
   );
+
+  // ── Realtime: detect agent reply while waiting for human ────────────────────
+  // When the conversation is in "pending/waiting for human" state and an agent
+  // sends a message, we unlock the composer so the client can continue chatting.
+  useEffect(() => {
+    const convId = conversation?.id;
+    if (!convId || !isWaitingForHuman) return;
+
+    const channel = supabase
+      .channel(`widget-agent-reply:${convId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "desk_messages",
+          filter: `conversation_id=eq.${convId}`,
+        },
+        (payload) => {
+          const msg = payload.new as Record<string, unknown>;
+          if (msg.sender_type === "agent") {
+            // Agent responded — unlock the composer
+            setIsWaitingForHuman(false);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [conversation?.id, isWaitingForHuman, setIsWaitingForHuman]);
 
   // ── Realtime: subscribe at the ChatWidget level (NOT inside ChatWidgetThread)
   // This runs before any isOpen/conversation guard, so the subscription stays alive
@@ -365,7 +363,7 @@ export function ChatWidget({ settings }: Props) {
         <>
           <ChatWidgetWelcome
             greeting={settings.greeting}
-            accountName={account?.name ?? null}
+            accountName={embedUser?.name ?? account?.name ?? null}
             quickActions={settings.quick_actions}
             onQuickAction={startConversation}
             onSendMessage={startConversation}
@@ -379,21 +377,40 @@ export function ChatWidget({ settings }: Props) {
             <CSATFeedback />
           ) : (
             <>
-              {isAiResponding && (
+              {/* "Falar com humano" — only shown when AI is active and not already waiting */}
+              {!isWaitingForHuman && (
                 <div className="px-4 pb-1">
                   <button
-                    onClick={() => {
-                      const sysMsg: WidgetMessage = {
-                        id: crypto.randomUUID(),
-                        conversation_id: conversation.id,
-                        sender_type: "system",
-                        content: "Você solicitou falar com um atendente humano",
-                        created_at: new Date().toISOString(),
-                        ai_generated: false,
-                        is_private_note: false,
-                      };
-                      addMessage(sysMsg);
+                    onClick={async () => {
+                      if (!conversation?.id) return;
+                      setIsWaitingForHuman(true);
                       setIsAiResponding(false);
+
+                      // 1. Update conversation status
+                      await supabase
+                        .from("desk_conversations")
+                        .update({
+                          status: "pending",
+                          ai_active: false,
+                          updated_at: new Date().toISOString(),
+                        })
+                        .eq("id", conversation.id);
+
+                      // 2. Insert visible system message
+                      const { data: sysRow } = await supabase
+                        .from("desk_messages")
+                        .insert({
+                          conversation_id: conversation.id,
+                          sender_type: "system",
+                          content: "🙋 Cliente solicitou atendimento humano",
+                          is_private_note: false,
+                          content_type: "text",
+                          ai_generated: false,
+                        })
+                        .select("id, conversation_id, sender_type, content, created_at, ai_generated, is_private_note")
+                        .single();
+
+                      if (sysRow) addMessage(sysRow as WidgetMessage);
                     }}
                     className="flex items-center gap-1.5 text-[11px] text-primary hover:underline"
                   >
@@ -402,7 +419,22 @@ export function ChatWidget({ settings }: Props) {
                   </button>
                 </div>
               )}
-              <ChatWidgetComposer onSend={handleSend} disabled={isAiResponding} />
+
+              {/* Waiting state banner */}
+              {isWaitingForHuman && (
+                <div className="px-4 pb-2">
+                  <p className="text-[11px] text-amber-500 flex items-center gap-1.5">
+                    <span className="animate-pulse">●</span>
+                    Aguardando atendente disponível...
+                  </p>
+                </div>
+              )}
+
+              <ChatWidgetComposer
+                onSend={handleSend}
+                disabled={isAiResponding || isWaitingForHuman}
+                placeholder={isWaitingForHuman ? "Aguardando atendente..." : undefined}
+              />
             </>
           )}
         </>

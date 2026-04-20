@@ -8,7 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Bot, Lock, Info, CheckCircle, Send, MessageSquare } from "lucide-react";
+import { Bot, Lock, Info, CheckCircle, Send, MessageSquare, UserPlus } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
@@ -31,7 +31,7 @@ export const convLiveChannelName = (id: string) => `conv-live:${id}`;
 
 export function ConversationThread() {
   const { activeConversationId, conversations } = useInboxStore();
-  const { messages, isLoadingMessages, loadMessages, addMessage, clearMessages } = useConversationStore();
+  const { messages, isLoadingMessages, loadMessages, addMessage, clearMessages, applySlaPolicy, airtableInfo } = useConversationStore();
   const agent = useAuthStore((s) => s.agent);
 
   const scrollRef  = useRef<HTMLDivElement>(null);
@@ -77,6 +77,24 @@ export function ConversationThread() {
     }
     loadMessages(activeConversationId);
   }, [activeConversationId, loadMessages, clearMessages]);
+
+  // ── Mark conversation as first seen by agent ────────────────────────────────
+  useEffect(() => {
+    if (!activeConversationId || !conversation) return;
+
+    // first_seen_by_agent_at may not exist on the type yet — cast to access safely
+    const conv = conversation as typeof conversation & { first_seen_by_agent_at?: string | null };
+    if (conv.first_seen_by_agent_at) return; // already seen
+
+    supabase
+      .from("desk_conversations")
+      .update({ first_seen_by_agent_at: new Date().toISOString() })
+      .eq("id", activeConversationId)
+      .then(({ error }) => {
+        if (error) console.warn("[ConversationThread] first_seen update failed:", error.message);
+      });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConversationId]);
 
   // ── Realtime: subscribe to new messages in this conversation ────────────────
   useEffect(() => {
@@ -131,6 +149,22 @@ export function ConversationThread() {
 
   // ── Actions ─────────────────────────────────────────────────────────────────
 
+  const handleAssignToMe = async () => {
+    if (!agent) return;
+    const { error } = await supabase
+      .from("desk_conversations")
+      .update({ assigned_agent_id: agent.id, updated_at: new Date().toISOString() })
+      .eq("id", activeConversationId!);
+
+    if (error) { toast.error("Erro ao atribuir conversa"); return; }
+
+    await supabase.from("desk_messages").insert({
+      conversation_id: activeConversationId,
+      sender_type: "system",
+      content: `Conversa atribuída para ${agent.name}`,
+    });
+  };
+
   const handleResolve = async () => {
     const { error } = await supabase
       .from("desk_conversations")
@@ -144,9 +178,15 @@ export function ConversationThread() {
     const { error } = await supabase
       .from("desk_conversations")
       .update({ priority })
-      .eq("id", activeConversationId);
+      .eq("id", activeConversationId!);
 
-    if (error) toast.error("Erro ao alterar prioridade");
+    if (error) {
+      toast.error("Erro ao alterar prioridade");
+      return;
+    }
+
+    // Apply SLA policy: use Airtable plan if available, else fall back to null (global policy)
+    await applySlaPolicy(activeConversationId!, priority, airtableInfo?.plan ?? null);
   };
 
   const handleSend = async () => {
@@ -250,6 +290,25 @@ export function ConversationThread() {
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
+
+          {/* Assign to me / assigned badge */}
+          {conversation.status !== "resolved" && (
+            conversation.assigned_agent_id === agent?.id ? (
+              <Badge variant="outline" className="text-[10px] h-7 px-2 border-primary/40 text-primary">
+                Você
+              </Badge>
+            ) : (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleAssignToMe}
+                className="text-xs h-7 gap-1"
+              >
+                <UserPlus className="h-3 w-3" />
+                Atribuir a mim
+              </Button>
+            )
+          )}
 
           {/* Resolve button */}
           {conversation.status !== "resolved" && (

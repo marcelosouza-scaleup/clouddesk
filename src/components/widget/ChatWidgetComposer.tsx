@@ -4,9 +4,10 @@ import { Send, Paperclip } from "lucide-react";
 interface Props {
   onSend: (message: string) => void;
   disabled?: boolean;
+  placeholder?: string;
 }
 
-export function ChatWidgetComposer({ onSend, disabled }: Props) {
+export function ChatWidgetComposer({ onSend, disabled, placeholder }: Props) {
   const [text, setText] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -39,7 +40,7 @@ export function ChatWidgetComposer({ onSend, disabled }: Props) {
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKey}
-          placeholder="Digite sua mensagem..."
+          placeholder={placeholder ?? "Digite sua mensagem..."}
           rows={1}
           disabled={disabled}
           className="flex-1 resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none py-1.5 max-h-24 scrollbar-thin"

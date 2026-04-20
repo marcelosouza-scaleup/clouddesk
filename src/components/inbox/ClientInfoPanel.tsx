@@ -1,6 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useConversationStore, type ClientPurchase, type PurchaseStatus } from "@/stores/useConversationStore";
 import { useInboxStore } from "@/stores/useInboxStore";
+import { supabase } from "@/integrations/supabase/client";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
@@ -17,11 +18,31 @@ import {
   RefreshCw,
   ExternalLink,
   Copy,
+  Building2,
+  TrendingUp,
+  FileText,
 } from "lucide-react";
 import { format, formatDistanceToNow } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+
+// ─── Airtable contact type ────────────────────────────────────────────────────
+
+interface AirtableContact {
+  airtable_id: string;
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+  plan: string | null;
+  status: string | null;
+  mrr: number | null;
+  company: string | null;
+  notes: string | null;
+  stripe_customer_id: string | null;
+  created_at: string | null;
+  raw: Record<string, unknown>;
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -95,17 +116,53 @@ export function ClientInfoPanel() {
   const conversations = useInboxStore((s) => s.conversations);
   const conversation = conversations.find((c) => c.id === activeConversationId);
 
-  const { clientProfile, isLoadingProfile, loadClientProfile, clearClientProfile } =
+  const { clientProfile, isLoadingProfile, loadClientProfile, clearClientProfile, setAirtableInfo } =
     useConversationStore();
+
+  const [airtableContact, setAirtableContact] = useState<AirtableContact | null>(null);
 
   // Load profile whenever the conversation changes
   useEffect(() => {
+    console.log("[ClientInfoPanel] conversa ativa:", conversation?.id, "account_user_id:", conversation?.account_user_id);
     if (conversation?.account_user_id) {
       loadClientProfile(conversation.account_user_id);
     } else {
+      console.warn("[ClientInfoPanel] account_user_id está null/undefined — não vai carregar perfil");
       clearClientProfile();
+      setAirtableContact(null);
     }
   }, [conversation?.account_user_id, loadClientProfile, clearClientProfile]);
+
+  // Fetch Airtable data once we have the email from the Supabase profile
+  useEffect(() => {
+    const email = clientProfile?.account?.email;
+    console.log("[ClientInfoPanel] clientProfile atualizado, email:", email, "| clientProfile:", clientProfile);
+    if (!email) return;
+
+    console.log("[ClientInfoPanel] 4. chamando get-contact-info com email:", email);
+    setAirtableContact(null);
+    supabase.functions
+      .invoke("get-contact-info", { body: { email } })
+      .then(({ data, error }) => {
+        console.log("[ClientInfoPanel] 5. retorno get-contact-info:", { data, error });
+        if (data?.contact) {
+          const contact = data.contact as AirtableContact;
+          setAirtableContact(contact);
+          // Expose plan + key fields to the store so ConversationThread can apply SLA
+          setAirtableInfo({
+            plan: contact.plan,
+            status: contact.status,
+            mrr: contact.mrr,
+            company: contact.company,
+          });
+        } else {
+          setAirtableInfo(null);
+        }
+      })
+      .catch((err) => {
+        console.warn("[ClientInfoPanel] Airtable fetch failed:", err);
+      });
+  }, [clientProfile?.account?.email]);
 
   if (!conversation) return null;
 
@@ -135,6 +192,7 @@ export function ClientInfoPanel() {
   return (
     <div className="space-y-0">
       {/* ── Deployment warning banner ── */}
+
       {deploymentIssues.length > 0 && (
         <div className="mx-3 mt-3 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5">
           <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
@@ -221,6 +279,63 @@ export function ClientInfoPanel() {
           </div>
         )}
       </div>
+
+      {/* ── Airtable CRM data ── */}
+      {airtableContact && (
+        <>
+          <Separator />
+          <div className="px-4 py-3 space-y-2.5">
+            <SectionHeader icon={Building2} title="CRM (Airtable)" />
+
+            <div className="space-y-1.5 text-xs">
+              {airtableContact.company && (
+                <MetaRow label="Empresa" value={airtableContact.company} />
+              )}
+              {airtableContact.plan && (
+                <MetaRow label="Plano" value={airtableContact.plan} />
+              )}
+              {airtableContact.status && (
+                <MetaRow label="Status CRM" value={airtableContact.status} />
+              )}
+              {airtableContact.mrr != null && (
+                <MetaRow
+                  label="MRR"
+                  value={formatCurrency(airtableContact.mrr, "BRL")}
+                  highlight
+                />
+              )}
+              {airtableContact.stripe_customer_id && (
+                <div className="flex items-center gap-2 group">
+                  <CreditCard className="h-3 w-3 text-muted-foreground shrink-0" />
+                  <span className="font-mono text-[10px] text-muted-foreground truncate flex-1">
+                    {airtableContact.stripe_customer_id}
+                  </span>
+                  <button
+                    onClick={() => copyToClipboard(airtableContact.stripe_customer_id!, "Stripe ID")}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-muted"
+                  >
+                    <Copy className="h-3 w-3 text-muted-foreground" />
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {airtableContact.notes && (
+              <div className="mt-2 rounded-md border border-border bg-muted/30 p-2">
+                <div className="flex items-center gap-1 mb-1">
+                  <FileText className="h-3 w-3 text-muted-foreground" />
+                  <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+                    Notas
+                  </span>
+                </div>
+                <p className="text-[11px] text-card-foreground leading-relaxed whitespace-pre-wrap">
+                  {airtableContact.notes}
+                </p>
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       <Separator />
 

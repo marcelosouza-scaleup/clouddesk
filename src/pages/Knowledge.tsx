@@ -31,6 +31,7 @@ import {
   EyeOff,
   Filter,
   X,
+  Cpu,
 } from "lucide-react";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
@@ -48,6 +49,7 @@ interface Article {
   is_published: boolean;
   created_at: string;
   updated_at: string;
+  embedding: unknown; // present when not null — used only for null-check
 }
 
 type FilterStatus = "all" | "published" | "draft";
@@ -68,6 +70,7 @@ export default function Knowledge() {
   const [sheetOpen, setSheetOpen]     = useState(false);
   const [editing, setEditing]         = useState<Article | null>(null);
   const [saving, setSaving]           = useState(false);
+  const [embedding, setEmbedding]     = useState(false);
   const [form, setForm] = useState({ title: "", content: "", category: "", is_published: false });
 
   // ── Delete confirm ──────────────────────────────────────────────────────────
@@ -79,7 +82,7 @@ export default function Knowledge() {
     setIsLoading(true);
     const { data, error } = await supabase
       .from("desk_knowledge_base")
-      .select("id, title, content, category, tags, is_published, created_at, updated_at")
+      .select("id, title, content, category, tags, is_published, created_at, updated_at, embedding")
       .order("updated_at", { ascending: false });
 
     if (error) {
@@ -147,34 +150,72 @@ export default function Knowledge() {
       updated_at:   new Date().toISOString(),
     };
 
-    let error;
+    let savedId: string | null = editing?.id ?? null;
+    let saveError: typeof import("@supabase/supabase-js").PostgrestError | null = null;
+
     if (editing) {
-      ({ error } = await supabase
+      const { error } = await supabase
         .from("desk_knowledge_base")
         .update(payload)
-        .eq("id", editing.id));
+        .eq("id", editing.id);
+      saveError = error;
     } else {
+      // Use .select("id").single() so we get the new record's id for embedding.
       // created_by omitted intentionally — mock agent UUID doesn't exist in
       // desk_agents yet, causing FK violation. Will be populated after real auth.
-      ({ error } = await supabase
+      const { data, error } = await supabase
         .from("desk_knowledge_base")
-        .insert(payload));
+        .insert(payload)
+        .select("id")
+        .single();
+      saveError = error;
+      if (data) savedId = data.id;
     }
 
-    if (error) {
+    if (saveError) {
       console.error("[Knowledge] save error:", {
-        code:    error.code,
-        message: error.message,
-        details: error.details,
-        hint:    error.hint,
+        code:    saveError.code,
+        message: saveError.message,
+        details: saveError.details,
+        hint:    saveError.hint,
       });
-      toast.error("Erro ao salvar artigo", { description: error.message });
-    } else {
-      toast.success(editing ? "Artigo atualizado" : "Artigo criado com sucesso");
-      setSheetOpen(false);
-      load();
+      toast.error("Erro ao salvar artigo", { description: saveError.message });
+      setSaving(false);
+      return;
     }
+
+    toast.success(editing ? "Artigo atualizado" : "Artigo criado com sucesso");
     setSaving(false);
+    setSheetOpen(false);
+    load();
+
+    // ── Generate embedding in the background (non-blocking) ──────────────────
+    // Now works for both new and existing articles — savedId is always populated.
+    if (savedId) {
+      generateArticleEmbedding(savedId, `${payload.title}\n\n${payload.content}`);
+    }
+  };
+
+  /**
+   * Calls desk-embed-article Edge Function to generate and persist the embedding.
+   * Failures are silent — the article is still usable, just won't appear in RAG.
+   */
+  const generateArticleEmbedding = async (id: string, content: string) => {
+    setEmbedding(true);
+    try {
+      const { error: fnErr } = await supabase.functions.invoke("desk-embed-article", {
+        body: { id, content, table: "desk_knowledge_base" },
+      });
+      if (fnErr) {
+        console.warn("[Knowledge] Embedding failed (non-fatal):", fnErr.message);
+      } else {
+        console.log("[Knowledge] Embedding saved for article", id);
+      }
+    } catch (err) {
+      console.warn("[Knowledge] Embedding error (non-fatal):", err);
+    } finally {
+      setEmbedding(false);
+    }
   };
 
   // ── Toggle publish ───────────────────────────────────────────────────────────
@@ -321,6 +362,9 @@ export default function Knowledge() {
                 onEdit={() => openEdit(article)}
                 onTogglePublish={() => handleTogglePublish(article)}
                 onDelete={() => setDeleteTarget(article)}
+                onRegenerate={() =>
+                  generateArticleEmbedding(article.id, `${article.title}\n\n${article.content}`)
+                }
               />
             ))}
           </div>
@@ -402,13 +446,22 @@ export default function Knowledge() {
             </div>
           </div>
 
-          <SheetFooter className="px-6 py-4 border-t border-border shrink-0 flex gap-2 justify-end">
-            <Button variant="outline" onClick={() => setSheetOpen(false)}>
-              Cancelar
-            </Button>
-            <Button onClick={handleSave} disabled={saving}>
-              {saving ? "Salvando..." : editing ? "Salvar alterações" : "Criar artigo"}
-            </Button>
+          <SheetFooter className="px-6 py-4 border-t border-border shrink-0 flex items-center justify-between gap-2">
+            {embedding ? (
+              <p className="text-[11px] text-muted-foreground animate-pulse">
+                Gerando embedding para busca semântica...
+              </p>
+            ) : (
+              <span />
+            )}
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setSheetOpen(false)}>
+                Cancelar
+              </Button>
+              <Button onClick={handleSave} disabled={saving}>
+                {saving ? "Salvando..." : editing ? "Salvar alterações" : "Criar artigo"}
+              </Button>
+            </div>
           </SheetFooter>
         </SheetContent>
       </Sheet>
@@ -446,14 +499,17 @@ function ArticleRow({
   onEdit,
   onTogglePublish,
   onDelete,
+  onRegenerate,
 }: {
   article: Article;
   onEdit: () => void;
   onTogglePublish: () => void;
   onDelete: () => void;
+  onRegenerate: () => void;
 }) {
   const preview = article.content.replace(/[#*`>\-]/g, "").slice(0, 140).trim();
   const updatedAt = format(new Date(article.updated_at), "dd MMM yyyy", { locale: ptBR });
+  const hasEmbedding = article.embedding != null;
 
   return (
     <div className="px-6 py-4 hover:bg-surface transition-colors group flex items-start gap-4">
@@ -480,6 +536,21 @@ function ArticleRow({
 
           {/* Actions — visible on hover */}
           <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+            {/* Regenerate embedding — always visible when embedding is missing */}
+            <Button
+              variant="ghost"
+              size="icon"
+              className={cn(
+                "h-7 w-7",
+                hasEmbedding
+                  ? "text-muted-foreground hover:text-primary"
+                  : "text-amber-500 hover:text-amber-400"
+              )}
+              onClick={onRegenerate}
+              title={hasEmbedding ? "Regenerar embedding" : "Gerar embedding (ausente)"}
+            >
+              <Cpu className="h-3.5 w-3.5" />
+            </Button>
             <Button
               variant="ghost"
               size="icon"
@@ -525,6 +596,20 @@ function ArticleRow({
             )}
           >
             {article.is_published ? "Publicado" : "Rascunho"}
+          </Badge>
+          {/* Embedding status badge */}
+          <Badge
+            variant="outline"
+            className={cn(
+              "text-[10px] h-4 px-1.5 border gap-0.5",
+              hasEmbedding
+                ? "text-primary border-primary/30 bg-primary/5"
+                : "text-amber-500 border-amber-500/30 bg-amber-500/5"
+            )}
+            title={hasEmbedding ? "Indexado para busca semântica" : "Sem embedding — clique em ⊙ para gerar"}
+          >
+            <Cpu className="h-2.5 w-2.5" />
+            {hasEmbedding ? "Indexado" : "Sem índice"}
           </Badge>
           {article.category && (
             <Badge variant="outline" className="text-[10px] h-4 px-1.5 text-muted-foreground">

@@ -1,6 +1,6 @@
 
 -- Tabela account (simulação local para testes)
-CREATE TABLE public.account (
+CREATE TABLE IF NOT EXISTS public.account (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL,
   name TEXT NOT NULL,

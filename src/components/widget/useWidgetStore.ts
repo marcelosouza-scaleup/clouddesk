@@ -8,6 +8,7 @@ interface WidgetState {
   messages: WidgetMessage[];
   isTyping: boolean;
   isAiResponding: boolean;
+  isWaitingForHuman: boolean;
   showCsat: boolean;
   csatSubmitted: boolean;
   unreadCount: number;
@@ -19,6 +20,7 @@ interface WidgetState {
   addMessage: (msg: WidgetMessage) => void;
   setIsTyping: (v: boolean) => void;
   setIsAiResponding: (v: boolean) => void;
+  setIsWaitingForHuman: (v: boolean) => void;
   setShowCsat: (v: boolean) => void;
   setCsatSubmitted: (v: boolean) => void;
   setUnreadCount: (n: number) => void;
@@ -40,6 +42,7 @@ export const useWidgetStore = create<WidgetState>((set) => ({
   messages: [],
   isTyping: false,
   isAiResponding: false,
+  isWaitingForHuman: false,
   showCsat: false,
   csatSubmitted: false,
   unreadCount: 0,
@@ -58,6 +61,7 @@ export const useWidgetStore = create<WidgetState>((set) => ({
   addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg] })),
   setIsTyping: (isTyping) => set({ isTyping }),
   setIsAiResponding: (isAiResponding) => set({ isAiResponding }),
+  setIsWaitingForHuman: (isWaitingForHuman) => set({ isWaitingForHuman }),
   setShowCsat: (showCsat) => set({ showCsat }),
   setCsatSubmitted: (csatSubmitted) => set({ csatSubmitted }),
   setUnreadCount: (unreadCount) => set({ unreadCount }),

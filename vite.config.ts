@@ -18,4 +18,29 @@ export default defineConfig(({ mode }) => ({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  build: mode === "widget"
+    ? {
+        // ── Widget embed build ────────────────────────────────────────────────
+        // Run with: VITE_MODE=widget npm run build:widget
+        lib: {
+          entry: path.resolve(__dirname, "src/widget-embed/index.tsx"),
+          name: "CloudDeskWidget",
+          formats: ["iife"],
+          fileName: () => "widget.js",
+        },
+        outDir: "dist-widget",
+        emptyOutDir: true,
+        rollupOptions: {
+          // Bundle everything — host site has no React
+          external: [],
+          output: {
+            // Inline all assets (CSS via style injection)
+            inlineDynamicImports: true,
+          },
+        },
+      }
+    : {
+        // ── Main app build (default) ──────────────────────────────────────────
+        outDir: "dist",
+      },
 }));

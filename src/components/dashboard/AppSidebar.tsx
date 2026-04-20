@@ -1,4 +1,6 @@
-import { Inbox, Users, BookOpen, Zap, Settings, Cloud, LogOut, Moon, Sun, Circle } from "lucide-react";
+import { useEffect, useState, useCallback } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { Inbox, Users, BookOpen, Zap, Settings, Cloud, LogOut, Moon, Sun, Circle, Bell, BellOff, LayoutGrid, PanelLeft } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useAuthStore } from "@/stores/authStore";
 import { useTheme } from "@/lib/theme";
@@ -6,102 +8,340 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useInboxStore } from "@/stores/useInboxStore";
+import { useNotifications } from "@/hooks/useNotifications";
+import { supabase } from "@/integrations/supabase/client";
+import { cn } from "@/lib/utils";
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface DeskView {
+  id: string;
+  name: string;
+  emoji: string | null;
+  color: string;
+  order_index: number;
+  filters: {
+    airtable_product?: string;
+    status?: string;
+    priority?: string;
+  };
+  is_active: boolean;
+}
+
+// ─── Fixed nav items ──────────────────────────────────────────────────────────
 
 const navItems = [
-  { title: "Inbox", url: "/inbox", icon: Inbox },
-  { title: "Contatos", url: "/contacts", icon: Users },
+  { title: "Inbox",                url: "/inbox",     icon: Inbox    },
+  { title: "Contatos",             url: "/contacts",  icon: Users    },
   { title: "Base de Conhecimento", url: "/knowledge", icon: BookOpen },
-  { title: "Macros", url: "/macros", icon: Zap },
-  { title: "Configurações", url: "/settings", icon: Settings },
+  { title: "Macros",               url: "/macros",    icon: Zap      },
+  { title: "Configurações",        url: "/settings",  icon: Settings },
 ];
 
 const statusColors: Record<string, string> = {
-  online: "bg-status-online",
-  away: "bg-status-away",
+  online:  "bg-status-online",
+  away:    "bg-status-away",
   offline: "bg-status-offline",
 };
 
+// ─── Component ────────────────────────────────────────────────────────────────
+
 export function AppSidebar() {
   const { agent, signOut, updateStatus } = useAuthStore();
+  const navigate = useNavigate();
   const { theme, toggleTheme } = useTheme();
-  const { conversations, activeTab } = useInboxStore();
-  const openCount = activeTab === "open" ? conversations.length : 0;
 
-  const initials = agent?.name?.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase() || "?";
+  const [isOpen, setIsOpen] = useState(() => {
+    try { return localStorage.getItem("sidebar-open") === "true"; } catch { return false; }
+  });
+
+  const toggleSidebar = () => {
+    setIsOpen((v) => {
+      const next = !v;
+      try { localStorage.setItem("sidebar-open", String(next)); } catch { /* ignore */ }
+      return next;
+    });
+  };
+  const { conversations, activeTab, setActiveTab, loadConversations, setPriorityFilter } = useInboxStore();
+  const { isEnabled, toggle } = useNotifications();
+  const location = useLocation();
+
+  const openCount = activeTab === "open" ? conversations.length : 0;
+  const initials = agent?.name?.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase() ?? "?";
+
+  // ── Dynamic views ────────────────────────────────────────────────────────────
+  const [views, setViews] = useState<DeskView[]>([]);
+  const [viewCounts, setViewCounts] = useState<Record<string, number>>({});
+  const [activeViewId, setActiveViewId] = useState<string | null>(null);
+
+  const loadViews = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("desk_views")
+      .select("id, name, emoji, color, order_index, filters, is_active")
+      .eq("is_active", true)
+      .order("order_index");
+
+    if (error || !data) return;
+    const loaded = data as DeskView[];
+    setViews(loaded);
+    fetchViewCounts(loaded);
+  }, []);
+
+  // Reload views on mount and whenever the user navigates back from Settings
+  useEffect(() => {
+    loadViews();
+  }, [loadViews, location.pathname]);
+
+  async function fetchViewCounts(loaded: DeskView[]) {
+    const counts: Record<string, number> = {};
+
+    await Promise.all(
+      loaded.map(async (view) => {
+        let query = supabase
+          .from("desk_conversations")
+          .select("id", { count: "exact", head: true });
+
+        const f = view.filters;
+
+        if (f.status) {
+          query = query.eq("status", f.status);
+        } else {
+          // Default: only non-resolved conversations
+          query = query.neq("status", "resolved");
+        }
+
+        if (f.priority) {
+          query = query.eq("priority", f.priority);
+        }
+
+        // TODO: filter by airtable_product
+        // This requires a cache of (account_user_id → plan) fetched from Airtable.
+        // Until that cache is implemented, airtable_product filter is skipped here
+        // and will always show all conversations matching the other criteria.
+
+        const { count } = await query;
+        counts[view.id] = count ?? 0;
+      })
+    );
+
+    setViewCounts(counts);
+  }
+
+  function handleViewClick(view: DeskView) {
+    setActiveViewId(view.id);
+
+    const targetStatus = (view.filters.status as "open" | "pending" | "snoozed" | "resolved" | undefined) ?? "open";
+    const targetPriority = (view.filters.priority as "low" | "medium" | "high" | "urgent" | undefined) ?? null;
+
+    setPriorityFilter(targetPriority);
+
+    if (targetStatus !== activeTab) {
+      // setActiveTab clears priorityFilter — set it again after
+      setActiveTab(targetStatus);
+      if (targetPriority) {
+        loadConversations(targetStatus, targetPriority);
+      }
+    } else {
+      loadConversations(targetStatus, targetPriority);
+    }
+  }
+
+  const handleToggleNotifications = () => {
+    toggle();
+  };
 
   return (
-    <aside className="w-16 hover:w-56 transition-all duration-200 group/sidebar bg-sidebar border-r border-sidebar-border flex flex-col h-screen overflow-hidden shrink-0">
-      {/* Logo */}
-      <div className="h-14 flex items-center px-4 gap-2 border-b border-sidebar-border shrink-0">
-        <Cloud className="h-6 w-6 text-primary shrink-0" />
-        <span className="text-sm font-bold text-foreground opacity-0 group-hover/sidebar:opacity-100 transition-opacity whitespace-nowrap">
-          CloudDesk
-        </span>
-      </div>
+    <TooltipProvider delayDuration={300}>
+      <aside className={cn(
+        "transition-all duration-200 bg-sidebar border-r border-sidebar-border flex flex-col h-screen overflow-hidden shrink-0",
+        isOpen ? "w-[220px]" : "w-[60px]"
+      )}>
 
-      {/* Nav */}
-      <nav className="flex-1 py-3 space-y-1 px-2">
-        {navItems.map((item) => (
-          <NavLink
-            key={item.url}
-            to={item.url}
-            end={item.url === "/inbox"}
-            className="flex items-center gap-3 px-2 py-2 rounded-md text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors text-sm"
-            activeClassName="bg-sidebar-accent text-sidebar-accent-foreground font-medium"
+        {/* Logo + toggle */}
+        <div className="h-14 flex items-center border-b border-sidebar-border shrink-0 px-2 gap-2">
+          <button
+            onClick={toggleSidebar}
+            className="h-8 w-8 flex items-center justify-center rounded-md hover:bg-sidebar-accent text-muted-foreground hover:text-sidebar-accent-foreground transition-colors shrink-0"
+            aria-label={isOpen ? "Fechar menu" : "Abrir menu"}
           >
-            <item.icon className="h-5 w-5 shrink-0" />
-            <span className="opacity-0 group-hover/sidebar:opacity-100 transition-opacity whitespace-nowrap">
-              {item.title}
-            </span>
-            {item.url === "/inbox" && openCount > 0 && (
-              <Badge className="ml-auto bg-unread-badge text-primary-foreground text-[10px] px-1.5 py-0 h-5 min-w-5 flex items-center justify-center opacity-0 group-hover/sidebar:opacity-100 transition-opacity">
-                {openCount}
-              </Badge>
-            )}
-          </NavLink>
-        ))}
-      </nav>
+            <PanelLeft className={cn("h-5 w-5 transition-transform duration-200", isOpen && "rotate-180")} />
+          </button>
+          {isOpen && (
+            <div className="flex items-center gap-1.5 overflow-hidden">
+              <Cloud className="h-5 w-5 text-primary shrink-0" />
+              <span className="text-sm font-bold text-foreground whitespace-nowrap">CloudDesk</span>
+            </div>
+          )}
+        </div>
 
-      {/* Footer */}
-      <div className="border-t border-sidebar-border p-2 space-y-2 shrink-0">
-        <Button variant="ghost" size="icon" onClick={toggleTheme} className="w-full flex items-center gap-3 justify-start px-2">
-          {theme === "dark" ? <Sun className="h-5 w-5 shrink-0" /> : <Moon className="h-5 w-5 shrink-0" />}
-          <span className="opacity-0 group-hover/sidebar:opacity-100 transition-opacity text-sm whitespace-nowrap">
-            {theme === "dark" ? "Modo claro" : "Modo escuro"}
-          </span>
-        </Button>
+        {/* Nav */}
+        <nav className="flex-1 py-3 space-y-1 px-2 overflow-y-auto scrollbar-thin">
+          {/* Fixed items */}
+          {navItems.map((item) => (
+            <NavLink
+              key={item.url}
+              to={item.url}
+              end={item.url === "/inbox"}
+              className="flex items-center gap-3 px-2 py-2 rounded-md text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors text-sm"
+              activeClassName="bg-sidebar-accent text-sidebar-accent-foreground font-medium"
+            >
+              <item.icon className="h-5 w-5 shrink-0" />
+              {isOpen && <span className="whitespace-nowrap flex-1">{item.title}</span>}
+              {isOpen && item.url === "/inbox" && openCount > 0 && (
+                <Badge className="ml-auto bg-unread-badge text-primary-foreground text-[10px] px-1.5 py-0 h-5 min-w-5 flex items-center justify-center">
+                  {openCount}
+                </Badge>
+              )}
+            </NavLink>
+          ))}
 
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button className="w-full flex items-center gap-3 px-2 py-2 rounded-md hover:bg-sidebar-accent transition-colors">
-              <div className="relative shrink-0">
-                <Avatar className="h-7 w-7">
-                  <AvatarFallback className="text-xs bg-primary text-primary-foreground">{initials}</AvatarFallback>
-                </Avatar>
-                <Circle className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 fill-current ${statusColors[agent?.status || "offline"]} text-sidebar rounded-full`} />
-              </div>
-              <span className="opacity-0 group-hover/sidebar:opacity-100 transition-opacity text-sm text-sidebar-foreground truncate whitespace-nowrap">
-                {agent?.name}
+          {/* Dynamic views section */}
+          {views.length > 0 && (
+            <>
+              {isOpen && (
+                <div className="pt-2 pb-1">
+                  <div className="flex items-center gap-1.5 px-2">
+                    <LayoutGrid className="h-3 w-3 text-muted-foreground shrink-0" />
+                    <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap">
+                      Visualizações
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {views.map((view) => (
+                <Tooltip key={view.id}>
+                  <TooltipTrigger asChild>
+                    <button
+                      onClick={() => handleViewClick(view)}
+                      className={cn(
+                        "w-full flex items-center gap-3 px-2 py-2 rounded-md text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors text-sm",
+                        activeViewId === view.id && "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
+                      )}
+                    >
+                      {/* Icon: colored dot when collapsed, emoji+dot when expanded */}
+                      <span
+                        className="h-5 w-5 rounded-full shrink-0 flex items-center justify-center text-sm"
+                        style={{ backgroundColor: `${view.color}25` }}
+                      >
+                        {view.emoji ? (
+                          <span className="text-xs leading-none">{view.emoji}</span>
+                        ) : (
+                          <span
+                            className="h-2 w-2 rounded-full"
+                            style={{ backgroundColor: view.color }}
+                          />
+                        )}
+                      </span>
+
+                      {isOpen && (
+                        <span className="whitespace-nowrap flex-1 text-left truncate">{view.name}</span>
+                      )}
+                      {isOpen && viewCounts[view.id] !== undefined && viewCounts[view.id] > 0 && (
+                        <Badge
+                          className="ml-auto text-[10px] px-1.5 py-0 h-5 min-w-5 flex items-center justify-center"
+                          style={{ backgroundColor: `${view.color}30`, color: view.color }}
+                        >
+                          {viewCounts[view.id]}
+                        </Badge>
+                      )}
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="right">
+                    <p>{view.name}</p>
+                    {viewCounts[view.id] !== undefined && (
+                      <p className="text-xs text-muted-foreground">{viewCounts[view.id]} conversas</p>
+                    )}
+                  </TooltipContent>
+                </Tooltip>
+              ))}
+            </>
+          )}
+        </nav>
+
+        {/* Footer */}
+        <div className="border-t border-sidebar-border p-2 space-y-2 shrink-0">
+          {/* Notifications toggle */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={handleToggleNotifications}
+                className="w-full flex items-center gap-3 justify-start px-2"
+              >
+                {isEnabled ? (
+                  <Bell className="h-5 w-5 shrink-0 text-primary" />
+                ) : (
+                  <BellOff className="h-5 w-5 shrink-0 text-muted-foreground" />
+                )}
+                {isOpen && (
+                  <span className="text-sm whitespace-nowrap">
+                    {isEnabled ? "Notificações ativas" : "Notificações desativadas"}
+                  </span>
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right">
+              {isEnabled ? "Desativar notificações" : "Ativar notificações"}
+            </TooltipContent>
+          </Tooltip>
+
+          {/* Theme toggle */}
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={toggleTheme}
+            className="w-full flex items-center gap-3 justify-start px-2"
+          >
+            {theme === "dark" ? <Sun className="h-5 w-5 shrink-0" /> : <Moon className="h-5 w-5 shrink-0" />}
+            {isOpen && (
+              <span className="text-sm whitespace-nowrap">
+                {theme === "dark" ? "Modo claro" : "Modo escuro"}
               </span>
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent side="right" align="end" className="w-48">
-            <DropdownMenuItem onClick={() => updateStatus("online")}>
-              <Circle className="h-3 w-3 fill-status-online text-status-online mr-2" /> Online
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => updateStatus("away")}>
-              <Circle className="h-3 w-3 fill-status-away text-status-away mr-2" /> Ausente
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => updateStatus("offline")}>
-              <Circle className="h-3 w-3 fill-status-offline text-status-offline mr-2" /> Offline
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={signOut}>
-              <LogOut className="h-3 w-3 mr-2" /> Sair
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-    </aside>
+            )}
+          </Button>
+
+          {/* Agent menu */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button className="w-full flex items-center gap-3 px-2 py-2 rounded-md hover:bg-sidebar-accent transition-colors">
+                <div className="relative shrink-0">
+                  <Avatar className="h-7 w-7">
+                    <AvatarFallback className="text-xs bg-primary text-primary-foreground">
+                      {initials}
+                    </AvatarFallback>
+                  </Avatar>
+                  <Circle
+                    className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 fill-current ${statusColors[agent?.status ?? "offline"]} text-sidebar rounded-full`}
+                  />
+                </div>
+                {isOpen && (
+                  <span className="text-sm text-sidebar-foreground truncate whitespace-nowrap">
+                    {agent?.name}
+                  </span>
+                )}
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent side="right" align="end" className="w-48">
+              <DropdownMenuItem onClick={() => updateStatus("online")}>
+                <Circle className="h-3 w-3 fill-status-online text-status-online mr-2" /> Online
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => updateStatus("away")}>
+                <Circle className="h-3 w-3 fill-status-away text-status-away mr-2" /> Ausente
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => updateStatus("offline")}>
+                <Circle className="h-3 w-3 fill-status-offline text-status-offline mr-2" /> Offline
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={async () => { await signOut(); navigate("/login", { replace: true }); }}>
+                <LogOut className="h-3 w-3 mr-2" /> Sair
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </aside>
+    </TooltipProvider>
   );
 }
