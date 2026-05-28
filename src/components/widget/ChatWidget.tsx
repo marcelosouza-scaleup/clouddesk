@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { UserRoundX } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useWidgetStore } from "./useWidgetStore";
@@ -8,9 +8,85 @@ import { ChatWidgetThread } from "./ChatWidgetThread";
 import { ChatWidgetComposer } from "./ChatWidgetComposer";
 import { CSATFeedback } from "./CSATFeedback";
 import type { CloudDeskSettings, WidgetMessage } from "./types";
+import type { ContactInfo } from "@/lib/airtable";
 
-// Fallback account_user_id for unauthenticated widget preview sessions
-const PREVIEW_ACCOUNT_USER_ID = "00000000-0000-0000-0000-000000000001";
+// ── Welcome message builder ────────────────────────────────────────────────────
+
+const NUMBER_EMOJIS = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"];
+
+function intervalPt(v: string): string {
+  return v === "month" ? "Mensal" : v === "year" ? "Anual" : v;
+}
+
+function subStatusIcon(v: string): string {
+  return v === "active" ? "🟢" : v === "canceled" ? "🔴" : "🟡";
+}
+
+function subStatusPt(v: string): string {
+  if (v === "active")   return "Ativa";
+  if (v === "canceled") return "Cancelada";
+  if (v === "trialing") return "Em teste";
+  if (v === "unpaid")   return "Inadimplente";
+  return v;
+}
+
+function formatDateBR(iso: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
+function buildWelcomeMessage(info: ContactInfo): string | null {
+  if (!info.customer) return null;
+
+  const name = info.customer.name;
+  const subs = info.subscriptions;
+
+  if (subs.length === 0) {
+    return `Olá, ${name}! 👋\n\nComo posso te ajudar hoje?`;
+  }
+
+  // Build one line per subscription:
+  // {num_emoji} {product} · {interval} — {status_icon} {status} | 🖥️ {purchase_code} | 📅 {date}
+  const subLines = subs.map((sub, idx) => {
+    const num      = NUMBER_EMOJIS[idx] ?? `${idx + 1}.`;
+    const interval = intervalPt(sub.interval);
+    const plan     = [sub.product, interval].filter(Boolean).join(" · ");
+    const icon     = subStatusIcon(sub.status);
+    const status   = subStatusPt(sub.status);
+    const date     = formatDateBR(sub.created_at);
+
+    const infra = info.infras.find((i) => i.subscription_id === sub.subscription_id) ?? null;
+
+    const infraPart = infra?.purchase_code ? `🖥️ ${infra.purchase_code}` : null;
+    const parts = [
+      `${num} ${plan} — ${icon} ${status}`,
+      ...(infraPart ? [infraPart] : []),
+      ...(date      ? [`📅 ${date}`] : []),
+    ];
+
+    return parts.join(" | ");
+  });
+
+  const activeSubs = subs.filter((s) => s.status === "active");
+  const closing = activeSubs.length >= 2
+    ? "Sobre qual assinatura você quer falar?"
+    : "Como posso te ajudar?";
+
+  const header = subs.length === 1
+    ? "Aqui estão suas informações:"
+    : `Encontrei ${subs.length} assinaturas na sua conta:`;
+
+  return [
+    `Olá, ${name}! 👋`,
+    "",
+    header,
+    ...subLines,
+    "",
+    closing,
+  ].join("\n");
+}
 
 // ── Edge Function call ────────────────────────────────────────────────────────
 // Uses supabase.functions.invoke() so the client handles auth headers correctly
@@ -26,6 +102,7 @@ async function callAiEdgeFunction(
   conversationId: string,
   message: string,
   accountName?: string | null,
+  accountEmail?: string | null,
 ): Promise<AIRespondResult> {
   const { data, error } = await supabase.functions.invoke<AIRespondResult>(
     "desk-ai-respond",
@@ -33,7 +110,8 @@ async function callAiEdgeFunction(
       body: {
         conversation_id: conversationId,
         message,
-        account_name: accountName ?? undefined,
+        account_name:  accountName  ?? undefined,
+        account_email: accountEmail ?? undefined,
       },
     },
   );
@@ -122,13 +200,20 @@ export function ChatWidget({ settings, embedUser }: Props) {
   } = useWidgetStore();
   // `messages` is used only for rendering — passed down to ChatWidgetThread
 
+  // Guard: welcome message triggered at most once per widget open session
+  const welcomeSentRef = useRef(false);
+
   const startConversation = useCallback(
     async (firstMessage: string) => {
       setIsAiResponding(true);
 
       try {
         // 1. Create conversation record in desk_conversations
-        const accountUserId = embedUser?.id ?? account?.user_id ?? PREVIEW_ACCOUNT_USER_ID;
+        const accountUserId = embedUser?.id ?? account?.user_id;
+        if (!accountUserId) {
+          throw new Error("Usuário não autenticado — widget não pode criar conversa sem sessão ativa");
+        }
+
         const { data: convData, error: convError } = await supabase
           .from("desk_conversations")
           .insert({
@@ -161,7 +246,8 @@ export function ChatWidget({ settings, embedUser }: Props) {
         const aiResult = await callAiEdgeFunction(
           convData.id,
           firstMessage,
-          embedUser?.name ?? account?.name,
+          embedUser?.name  ?? account?.name,
+          embedUser?.email ?? account?.email,
         );
 
         if (aiResult.blocked) {
@@ -209,7 +295,8 @@ export function ChatWidget({ settings, embedUser }: Props) {
         const aiResult = await callAiEdgeFunction(
           conversation.id,
           text,
-          embedUser?.name ?? account?.name,
+          embedUser?.name  ?? account?.name,
+          embedUser?.email ?? account?.email,
         );
 
         if (aiResult.blocked) {
@@ -239,6 +326,70 @@ export function ChatWidget({ settings, embedUser }: Props) {
     },
     [account, embedUser, conversation, addMessage, setIsAiResponding, startConversation]
   );
+
+  // ── Welcome message: fires once when the widget opens with no existing conversation ──
+  // Calls get-contact-info, builds the greeting in code (no OpenAI), creates the
+  // conversation record and inserts a bot message immediately.
+  useEffect(() => {
+    if (!isOpen) {
+      // Reset guard when widget is closed so it fires again next open
+      welcomeSentRef.current = false;
+      return;
+    }
+    if (conversation) return;           // already has a conversation — skip
+    if (welcomeSentRef.current) return; // already ran this open session
+
+    const email = embedUser?.email ?? account?.email;
+    if (!email) return; // no user — skip (anonymous)
+
+    welcomeSentRef.current = true;
+
+    (async () => {
+      const accountUserId = embedUser?.id ?? account?.user_id;
+      if (!accountUserId) return;
+
+      try {
+        // 1. Fetch contact info — no OpenAI, just Airtable
+        const { data: contactData } = await supabase.functions.invoke<ContactInfo>(
+          "get-contact-info",
+          { body: { email } },
+        );
+
+        const welcomeText = contactData ? buildWelcomeMessage(contactData) : null;
+        if (!welcomeText) return;
+
+        // 2. Create conversation record
+        const { data: convData, error: convError } = await supabase
+          .from("desk_conversations")
+          .insert({
+            account_user_id: accountUserId,
+            channel: "chat",
+            status: "open",
+            priority: "medium",
+            subject: "Atendimento via widget",
+            ai_active: true,
+          })
+          .select("id, status, created_at, subject")
+          .single();
+
+        if (convError || !convData) return;
+
+        setConversation({
+          id: convData.id,
+          status: convData.status,
+          created_at: convData.created_at,
+          subject: convData.subject,
+        });
+
+        // 3. Insert welcome bot message (ai_generated = false — built by code, not OpenAI)
+        const botMsg = await insertMessage(convData.id, "bot", welcomeText, false);
+        if (botMsg) addMessage(botMsg);
+      } catch (err) {
+        console.error("[Widget] Welcome message error:", err);
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
   // ── Realtime: detect agent reply while waiting for human ────────────────────
   // When the conversation is in "pending/waiting for human" state and an agent

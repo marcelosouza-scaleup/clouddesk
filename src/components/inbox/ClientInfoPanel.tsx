@@ -16,33 +16,15 @@ import {
   Clock,
   XCircle,
   RefreshCw,
-  ExternalLink,
   Copy,
   Building2,
   TrendingUp,
-  FileText,
 } from "lucide-react";
 import { format, formatDistanceToNow } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-
-// ─── Airtable contact type ────────────────────────────────────────────────────
-
-interface AirtableContact {
-  airtable_id: string;
-  name: string | null;
-  email: string | null;
-  phone: string | null;
-  plan: string | null;
-  status: string | null;
-  mrr: number | null;
-  company: string | null;
-  notes: string | null;
-  stripe_customer_id: string | null;
-  created_at: string | null;
-  raw: Record<string, unknown>;
-}
+import { type ContactInfo, planLabel } from "@/lib/airtable";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -119,7 +101,7 @@ export function ClientInfoPanel() {
   const { clientProfile, isLoadingProfile, loadClientProfile, clearClientProfile, setAirtableInfo } =
     useConversationStore();
 
-  const [airtableContact, setAirtableContact] = useState<AirtableContact | null>(null);
+  const [contactInfo, setContactInfo] = useState<ContactInfo | null>(null);
 
   // Load profile whenever the conversation changes
   useEffect(() => {
@@ -129,7 +111,7 @@ export function ClientInfoPanel() {
     } else {
       console.warn("[ClientInfoPanel] account_user_id está null/undefined — não vai carregar perfil");
       clearClientProfile();
-      setAirtableContact(null);
+      setContactInfo(null);
     }
   }, [conversation?.account_user_id, loadClientProfile, clearClientProfile]);
 
@@ -140,22 +122,24 @@ export function ClientInfoPanel() {
     if (!email) return;
 
     console.log("[ClientInfoPanel] 4. chamando get-contact-info com email:", email);
-    setAirtableContact(null);
+    setContactInfo(null);
     supabase.functions
       .invoke("get-contact-info", { body: { email } })
       .then(({ data, error }) => {
         console.log("[ClientInfoPanel] 5. retorno get-contact-info:", { data, error });
-        if (data?.contact) {
-          const contact = data.contact as AirtableContact;
-          setAirtableContact(contact);
-          // Expose plan + key fields to the store so ConversationThread can apply SLA
+        const info = data as ContactInfo | null;
+        if (info?.customer || info?.subscription || info?.infra) {
+          setContactInfo(info);
+          // Expose plan (product) + key fields to the store so ConversationThread can apply SLA
           setAirtableInfo({
-            plan: contact.plan,
-            status: contact.status,
-            mrr: contact.mrr,
-            company: contact.company,
+            product:  info.subscription?.product ?? null,
+            interval: info.subscription?.interval ?? null,
+            status:   info.subscription?.status ?? null,
+            mrr:      info.subscription?.mrr ?? null,
+            referral: info.customer?.referral ?? null,
           });
         } else {
+          setContactInfo(null);
           setAirtableInfo(null);
         }
       })
@@ -281,56 +265,83 @@ export function ClientInfoPanel() {
       </div>
 
       {/* ── Airtable CRM data ── */}
-      {airtableContact && (
+      {(contactInfo?.subscription || contactInfo?.infra) && (
         <>
           <Separator />
           <div className="px-4 py-3 space-y-2.5">
             <SectionHeader icon={Building2} title="CRM (Airtable)" />
 
-            <div className="space-y-1.5 text-xs">
-              {airtableContact.company && (
-                <MetaRow label="Empresa" value={airtableContact.company} />
-              )}
-              {airtableContact.plan && (
-                <MetaRow label="Plano" value={airtableContact.plan} />
-              )}
-              {airtableContact.status && (
-                <MetaRow label="Status CRM" value={airtableContact.status} />
-              )}
-              {airtableContact.mrr != null && (
-                <MetaRow
-                  label="MRR"
-                  value={formatCurrency(airtableContact.mrr, "BRL")}
-                  highlight
-                />
-              )}
-              {airtableContact.stripe_customer_id && (
-                <div className="flex items-center gap-2 group">
-                  <CreditCard className="h-3 w-3 text-muted-foreground shrink-0" />
-                  <span className="font-mono text-[10px] text-muted-foreground truncate flex-1">
-                    {airtableContact.stripe_customer_id}
-                  </span>
-                  <button
-                    onClick={() => copyToClipboard(airtableContact.stripe_customer_id!, "Stripe ID")}
-                    className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-muted"
-                  >
-                    <Copy className="h-3 w-3 text-muted-foreground" />
-                  </button>
-                </div>
-              )}
-            </div>
+            {contactInfo.airtable_limited && (
+              <div className="flex items-center gap-1.5 text-[10px] text-amber-500 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1">
+                <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
+                Dados parciais — limite do Airtable atingido
+              </div>
+            )}
 
-            {airtableContact.notes && (
-              <div className="mt-2 rounded-md border border-border bg-muted/30 p-2">
-                <div className="flex items-center gap-1 mb-1">
-                  <FileText className="h-3 w-3 text-muted-foreground" />
-                  <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
-                    Notas
-                  </span>
+            {contactInfo.subscription && (
+              <div className="space-y-1.5 text-xs">
+                {planLabel(contactInfo.subscription) && (
+                  <MetaRow label="Plano" value={planLabel(contactInfo.subscription)!} />
+                )}
+                {contactInfo.subscription.status && (
+                  <MetaRow label="Status CRM" value={contactInfo.subscription.status} />
+                )}
+                {contactInfo.subscription.mrr != null && contactInfo.subscription.mrr > 0 && (
+                  <MetaRow
+                    label="MRR"
+                    value={formatCurrency(contactInfo.subscription.mrr, "BRL")}
+                    highlight
+                  />
+                )}
+                {contactInfo.subscription.promocode && (
+                  <MetaRow label="Promocode" value={contactInfo.subscription.promocode} />
+                )}
+                {contactInfo.customer?.referral && (
+                  <MetaRow label="Referral" value={contactInfo.customer.referral} />
+                )}
+                {contactInfo.subscription.subscription_id && (
+                  <div className="flex items-center gap-2 group">
+                    <CreditCard className="h-3 w-3 text-muted-foreground shrink-0" />
+                    <span className="font-mono text-[10px] text-muted-foreground truncate flex-1">
+                      {contactInfo.subscription.subscription_id}
+                    </span>
+                    <button
+                      onClick={() => copyToClipboard(contactInfo.subscription!.subscription_id, "Subscription ID")}
+                      className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-muted"
+                    >
+                      <Copy className="h-3 w-3 text-muted-foreground" />
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Infra usage */}
+            {contactInfo.infra && (
+              <div className="mt-2 rounded-md border border-border bg-muted/30 p-2 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1">
+                    <TrendingUp className="h-3 w-3 text-muted-foreground" />
+                    <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+                      Infraestrutura
+                    </span>
+                  </div>
+                  {contactInfo.infra.status && (
+                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-4">
+                      {contactInfo.infra.status}
+                    </Badge>
+                  )}
                 </div>
-                <p className="text-[11px] text-card-foreground leading-relaxed whitespace-pre-wrap">
-                  {airtableContact.notes}
-                </p>
+                {contactInfo.infra.purchase_code && (
+                  <p className="text-[10px] font-mono text-muted-foreground opacity-70 truncate">
+                    {contactInfo.infra.purchase_code}
+                  </p>
+                )}
+                <div className="grid grid-cols-3 gap-1 pt-0.5">
+                  <UsageStat label="24h" value={contactInfo.infra.requests_24h} />
+                  <UsageStat label="7d"  value={contactInfo.infra.requests_7d} />
+                  <UsageStat label="30d" value={contactInfo.infra.requests_30d} />
+                </div>
               </div>
             )}
           </div>
@@ -502,6 +513,17 @@ function MetaGrid({
       {conversation.ai_active && (
         <MetaRow label="IA" value="Ativa" highlight />
       )}
+    </div>
+  );
+}
+
+function UsageStat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="flex flex-col items-center rounded bg-card/60 py-1">
+      <span className="text-[11px] font-semibold text-card-foreground tabular-nums">
+        {value.toLocaleString("pt-BR")}
+      </span>
+      <span className="text-[9px] text-muted-foreground">{label}</span>
     </div>
   );
 }

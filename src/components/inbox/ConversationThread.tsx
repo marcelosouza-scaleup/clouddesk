@@ -185,8 +185,8 @@ export function ConversationThread() {
       return;
     }
 
-    // Apply SLA policy: use Airtable plan if available, else fall back to null (global policy)
-    await applySlaPolicy(activeConversationId!, priority, airtableInfo?.plan ?? null);
+    // Apply SLA policy: use Airtable product (plan name) if available, else fall back to null (global policy)
+    await applySlaPolicy(activeConversationId!, priority, airtableInfo?.product ?? null);
   };
 
   const handleSend = async () => {

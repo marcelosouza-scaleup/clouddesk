@@ -7,6 +7,7 @@ interface AIRespondRequest {
   conversation_id: string;
   message: string;
   account_name?: string;
+  account_email?: string; // passed by widget directly — avoids account table lookup
 }
 
 interface AIRespondResult {
@@ -41,6 +42,37 @@ interface OpenAIEmbeddingResponse {
 
 interface OpenAIChatResponse {
   choices: Array<{ message: { content: string } }>;
+}
+
+interface ContactCustomer {
+  name: string;
+  email: string;
+  customer_id: string;
+  referral: string;
+}
+
+interface ContactSubscription {
+  subscription_id: string;
+  status: string;
+  product: string;
+  mrr: number;
+  interval: string;
+  promocode: string;
+}
+
+interface ContactInfra {
+  subscription_id: string;
+  infra_id: string;
+  purchase_code: string;
+  requests_24h: number;
+  requests_7d: number;
+  requests_30d: number;
+}
+
+interface ContactInfoResult {
+  customer: ContactCustomer | null;
+  subscriptions: ContactSubscription[];
+  infras: ContactInfra[];
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -106,10 +138,51 @@ async function callOpenAI(
 
 // ─── Prompt builder ───────────────────────────────────────────────────────────
 
+function buildClientContext(info: ContactInfoResult | null): string {
+  if (!info?.customer) return '';
+
+  const { customer, subscriptions, infras } = info;
+
+  const intervalLabel = (i: string) => i === 'month' ? 'Mensal' : i === 'year' ? 'Anual' : i;
+
+  const subLines = subscriptions.length > 0
+    ? subscriptions.map((s) => {
+        const infra = infras.find((inf) => inf.subscription_id === s.subscription_id);
+        const infraStr = infra
+          ? `${infra.purchase_code} (24h: ${infra.requests_24h} req, 7d: ${infra.requests_7d} req)`
+          : 'Não provisionada';
+        const statusIcon = s.status === 'active' ? '✅' : '❌';
+        const planLabel = [s.product, s.interval ? intervalLabel(s.interval) : ''].filter(Boolean).join(' · ');
+        return `  ${statusIcon} ${planLabel} — Status: ${s.status}${s.mrr > 0 ? ` — MRR: R$${s.mrr}` : ''}${s.promocode ? ` — Promo: ${s.promocode}` : ''}\n     Infra: ${infraStr}`;
+      }).join('\n')
+    : '  Nenhuma subscription encontrada';
+
+  return `
+--- CONTEXTO DO CLIENTE ---
+Nome: ${customer.name}
+Email: ${customer.email}
+Stripe ID: ${customer.customer_id}${customer.referral ? `\nReferral: ${customer.referral}` : ''}
+Subscriptions:
+${subLines}
+---------------------------
+
+--- REGRAS DE COMUNICAÇÃO ---
+- NUNCA mencione valores financeiros como MRR, LTV, receita ou qualquer métrica interna
+- NUNCA mencione nomes de campos internos: MRR, purchase_code, infra_id, customer_id, subscription_id
+- Para se referir ao plano, use apenas: "seu plano Cloud Advanced" ou "sua assinatura"
+- Para se referir ao valor, diga apenas "o valor da sua assinatura" — nunca o número
+- Para se referir à infra, use o purchase_code como apelido amigável se necessário, mas prefira "sua infraestrutura"
+- Tom: prestativo, direto, sem jargão técnico
+-----------------------------
+`;
+}
+
 function buildSystemPrompt(
   kbMatches: KBMatch[],
   faqMatches: FAQMatch[],
   clientName?: string,
+  contactInfo?: ContactInfoResult | null,
+  isFirstMessage?: boolean,
 ): string {
   const clientSection = clientName
     ? `\n[CLIENTE]\nVocê está atendendo: ${clientName}. Cumprimente-o pelo nome na primeira mensagem.\n`
@@ -139,8 +212,33 @@ function buildSystemPrompt(
     contextSection = parts.join('\n\n---\n\n');
   }
 
+  const contactContext = buildClientContext(contactInfo ?? null);
+
+  const firstMessageInstruction = isFirstMessage && contactInfo?.customer
+    ? `
+[PRIMEIRA MENSAGEM — SAUDAÇÃO PROATIVA OBRIGATÓRIA]
+Esta é a primeira mensagem do cliente. NÃO pergunte apenas "Como posso ajudar?".
+Cumprimente pelo nome e apresente um resumo do que você já sabe sobre ele, no seguinte formato:
+
+"Olá, ${contactInfo.customer.name}! Vi aqui no seu perfil:
+${contactInfo.subscriptions.filter(s => s.status === 'active').map(s => {
+  const infra = contactInfo.infras.find(i => i.subscription_id === s.subscription_id);
+  const interval = s.interval === 'month' ? 'Mensal' : s.interval === 'year' ? 'Anual' : s.interval;
+  const planStr = [s.product, interval].filter(Boolean).join(' · ');
+  return infra
+    ? `• ${planStr} (sua infraestrutura: ${infra.purchase_code})`
+    : `• ${planStr}`;
+}).join('\n')}
+
+Sobre o que você precisa de ajuda hoje?"
+
+Se não houver assinaturas ativas, apenas cumprimente pelo nome e pergunte como pode ajudar.
+Adapte o tom — não copie o formato acima palavra por palavra, mas inclua as informações.
+`
+    : '';
+
   return `${BASE_SYSTEM_PROMPT}
-${clientSection}
+${clientSection}${contactContext}${firstMessageInstruction}
 ---
 
 [REGRA DE TRANSFERÊNCIA — OBRIGATÓRIA]
@@ -162,7 +260,7 @@ Deno.serve(async (req) => {
 
   try {
     const body: AIRespondRequest = await req.json();
-    const { conversation_id, message, account_name } = body;
+    const { conversation_id, message, account_name, account_email } = body;
 
     if (!conversation_id || !message) {
       return new Response(
@@ -182,7 +280,7 @@ Deno.serve(async (req) => {
     // ── Guard: skip if conversation is not AI-active or already resolved/pending ─
     const { data: convRow, error: convErr } = await supabase
       .from('desk_conversations')
-      .select('ai_active, status')
+      .select('ai_active, status, account_user_id')
       .eq('id', conversation_id)
       .maybeSingle();
 
@@ -205,8 +303,45 @@ Deno.serve(async (req) => {
     const apiKey = Deno.env.get('OPENAI_API_KEY');
     if (!apiKey) throw new Error('Missing OPENAI_API_KEY secret');
 
-    // ── Step 1: Conversation history (last 10 messages, oldest-first) ─────────
-    const { data: historyRows, error: historyErr } = await supabase
+    // ── Step 1: Conversation history + client contact info in parallel ─────────
+    const accountUserId = (convRow as Record<string, unknown> | null)?.account_user_id as string | undefined;
+
+    // Resolve client email: use account_email from request body if provided (widget path),
+    // otherwise fall back to querying the account table by user_id.
+    // Non-fatal: if any step fails, the AI proceeds without client context.
+    const contactInfoPromise: Promise<ContactInfoResult | null> = (async () => {
+      try {
+        let email = account_email ?? null;
+
+        if (!email && accountUserId) {
+          const { data: acc } = await supabase
+            .from('account')
+            .select('email')
+            .eq('user_id', accountUserId)
+            .maybeSingle();
+          email = acc?.email ?? null;
+        }
+
+        if (!email) return null;
+
+        const res = await fetch(`${supabaseUrl}/functions/v1/get-contact-info`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${supabaseKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ email }),
+        });
+
+        if (!res.ok) return null;
+        return await res.json() as ContactInfoResult;
+      } catch (e) {
+        console.warn('[AI] get-contact-info failed:', e instanceof Error ? e.message : e);
+        return null;
+      }
+    })();
+
+    const historyPromise = supabase
       .from('desk_messages')
       .select('sender_type, content')
       .eq('conversation_id', conversation_id)
@@ -214,10 +349,17 @@ Deno.serve(async (req) => {
       .order('created_at', { ascending: false })
       .limit(10);
 
+    const [contactInfo, { data: historyRows, error: historyErr }] = await Promise.all([
+      contactInfoPromise,
+      historyPromise,
+    ]);
+
     if (historyErr) console.warn('[AI] History fetch failed:', historyErr.message);
+    console.log(`[AI] contact=${contactInfo?.customer?.name ?? 'unknown'}`);
 
     const history = ((historyRows ?? []) as MessageRow[]).reverse();
-    console.log(`[AI] History: ${history.length} messages`);
+    const isFirstMessage = history.length === 0;
+    console.log(`[AI] History: ${history.length} messages, firstMessage=${isFirstMessage}`);
 
     // ── Step 2: Semantic search (RAG) ─────────────────────────────────────────
     // Generate embedding for the user's message, then query KB and FAQ in parallel.
@@ -261,7 +403,7 @@ Deno.serve(async (req) => {
     }
 
     // ── Step 3: Build prompt + call OpenAI ────────────────────────────────────
-    const systemPrompt = buildSystemPrompt(kbMatches, faqMatches, account_name);
+    const systemPrompt = buildSystemPrompt(kbMatches, faqMatches, account_name, contactInfo, isFirstMessage);
 
     const chatMessages = history.map((m) => ({
       role: m.sender_type === 'contact' ? 'user' : 'assistant',

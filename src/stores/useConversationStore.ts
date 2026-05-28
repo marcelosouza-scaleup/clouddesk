@@ -55,10 +55,11 @@ export interface ClientProfile {
 }
 
 export interface AirtableContactInfo {
-  plan: string | null;
+  product: string | null;   // nome do plano (ex: "Cloud Advanced") — usado no match de SLA
+  interval: string | null;  // "month" | "year"
   status: string | null;
   mrr: number | null;
-  company: string | null;
+  referral: string | null;
 }
 
 // ─── Store ────────────────────────────────────────────────────────────────────

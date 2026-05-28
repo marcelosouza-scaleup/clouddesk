@@ -14,35 +14,19 @@ import {
   Search,
   Users,
   Mail,
-  Phone,
-  Building2,
   TrendingUp,
-  FileText,
   MessageSquare,
   Copy,
   AlertCircle,
+  Activity,
 } from "lucide-react";
 import { format, formatDistanceToNow } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { type ContactInfo, planLabel } from "@/lib/airtable";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-
-interface AirtableContact {
-  airtable_id: string;
-  name: string | null;
-  email: string | null;
-  phone: string | null;
-  plan: string | null;
-  status: string | null;
-  mrr: number | null;
-  company: string | null;
-  notes: string | null;
-  stripe_customer_id: string | null;
-  created_at: string | null;
-  raw: Record<string, unknown>;
-}
 
 interface ConversationRecord {
   id: string;
@@ -82,11 +66,11 @@ function statusBadgeCls(status: string | null): string {
 
 export default function Contacts() {
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<AirtableContact[]>([]);
+  const [results, setResults] = useState<ContactInfo[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<AirtableContact | null>(null);
+  const [selected, setSelected] = useState<ContactInfo | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -125,8 +109,9 @@ export default function Contacts() {
       return;
     }
 
-    if (data?.contact) {
-      setResults([data.contact as AirtableContact]);
+    const info = data as ContactInfo | null;
+    if (info?.customer || info?.subscription || info?.infra) {
+      setResults([info]);
     } else {
       setResults([]);
     }
@@ -190,11 +175,11 @@ export default function Contacts() {
         {/* Results */}
         {!isSearching && results.length > 0 && (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {results.map((contact) => (
+            {results.map((info) => (
               <ContactCard
-                key={contact.airtable_id}
-                contact={contact}
-                onClick={() => setSelected(contact)}
+                key={info.customer?.customer_id ?? info.customer?.email ?? "result"}
+                info={info}
+                onClick={() => setSelected(info)}
               />
             ))}
           </div>
@@ -203,7 +188,7 @@ export default function Contacts() {
 
       {/* Detail drawer */}
       <ContactDrawer
-        contact={selected}
+        info={selected}
         onClose={() => setSelected(null)}
       />
     </div>
@@ -213,12 +198,15 @@ export default function Contacts() {
 // ─── Contact card ─────────────────────────────────────────────────────────────
 
 function ContactCard({
-  contact,
+  info,
   onClick,
 }: {
-  contact: AirtableContact;
+  info: ContactInfo;
   onClick: () => void;
 }) {
+  const { customer, subscription } = info;
+  const plan = planLabel(subscription);
+
   return (
     <button
       onClick={onClick}
@@ -228,51 +216,43 @@ function ContactCard({
       <div className="flex items-start justify-between gap-2">
         <div>
           <p className="text-sm font-semibold text-card-foreground leading-tight">
-            {contact.name ?? "—"}
+            {customer?.name ?? "—"}
           </p>
-          {contact.company && (
-            <p className="text-[11px] text-muted-foreground mt-0.5">{contact.company}</p>
+          {customer?.referral && (
+            <p className="text-[11px] text-muted-foreground mt-0.5">via {customer.referral}</p>
           )}
         </div>
-        {contact.status && (
+        {subscription?.status && (
           <Badge
             variant="outline"
-            className={cn("text-[10px] px-1.5 py-0 h-4 shrink-0 border", statusBadgeCls(contact.status))}
+            className={cn("text-[10px] px-1.5 py-0 h-4 shrink-0 border", statusBadgeCls(subscription.status))}
           >
-            {contact.status}
+            {subscription.status}
           </Badge>
         )}
       </div>
 
       {/* Email */}
-      {contact.email && (
+      {customer?.email && (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <Mail className="h-3 w-3 shrink-0" />
-          <span className="truncate">{contact.email}</span>
+          <span className="truncate">{customer.email}</span>
         </div>
       )}
 
       {/* Plan + MRR */}
       <div className="flex items-center justify-between text-xs">
-        {contact.plan ? (
-          <span className="text-indigo-400 font-medium">{contact.plan}</span>
+        {plan ? (
+          <span className="text-indigo-400 font-medium">{plan}</span>
         ) : (
           <span className="text-muted-foreground">Sem plano</span>
         )}
-        {contact.mrr != null && (
+        {subscription?.mrr != null && subscription.mrr > 0 && (
           <span className="text-emerald-400 font-semibold">
-            {formatCurrency(contact.mrr)}
+            {formatCurrency(subscription.mrr)}
           </span>
         )}
       </div>
-
-      {/* Phone */}
-      {contact.phone && (
-        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          <Phone className="h-3 w-3 shrink-0" />
-          <span>{contact.phone}</span>
-        </div>
-      )}
     </button>
   );
 }
@@ -280,17 +260,19 @@ function ContactCard({
 // ─── Contact drawer ───────────────────────────────────────────────────────────
 
 function ContactDrawer({
-  contact,
+  info,
   onClose,
 }: {
-  contact: AirtableContact | null;
+  info: ContactInfo | null;
   onClose: () => void;
 }) {
   const [conversations, setConversations] = useState<ConversationRecord[]>([]);
   const [isLoadingConvs, setIsLoadingConvs] = useState(false);
 
+  const email = info?.customer?.email ?? null;
+
   useEffect(() => {
-    if (!contact?.email) {
+    if (!email) {
       setConversations([]);
       return;
     }
@@ -300,7 +282,7 @@ function ContactDrawer({
     supabase
       .from("account")
       .select("user_id")
-      .eq("email", contact.email)
+      .eq("email", email)
       .maybeSingle()
       .then(({ data: acc }) => {
         if (!acc?.user_id) {
@@ -320,50 +302,64 @@ function ContactDrawer({
           });
       })
       .catch(() => setIsLoadingConvs(false));
-  }, [contact?.email]);
+  }, [email]);
 
-  if (!contact) return null;
+  if (!info) return null;
+
+  const { customer, subscription, infra } = info;
 
   return (
-    <Sheet open={!!contact} onOpenChange={(open) => { if (!open) onClose(); }}>
+    <Sheet open={!!info} onOpenChange={(open) => { if (!open) onClose(); }}>
       <SheetContent className="w-[420px] sm:max-w-[420px] overflow-y-auto bg-card border-border">
         <SheetHeader className="pb-4">
-          <SheetTitle className="text-base">{contact.name ?? contact.email ?? "Contato"}</SheetTitle>
+          <SheetTitle className="text-base">{customer?.name ?? customer?.email ?? "Contato"}</SheetTitle>
         </SheetHeader>
 
         <div className="space-y-5">
+          {info.airtable_limited && (
+            <div className="flex items-center gap-1.5 text-[11px] text-amber-500 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1.5">
+              <AlertCircle className="h-3 w-3 shrink-0" />
+              Dados parciais — limite do Airtable atingido
+            </div>
+          )}
+
           {/* Identity */}
           <Section icon={Users} title="Dados do contato">
-            <InfoRow label="Nome" value={contact.name} />
-            <InfoRow label="E-mail" value={contact.email} copyable />
-            <InfoRow label="Telefone" value={contact.phone} />
-            <InfoRow label="Empresa" value={contact.company} />
+            <InfoRow label="Nome" value={customer?.name} />
+            <InfoRow label="E-mail" value={customer?.email} copyable />
+            <InfoRow label="Referral" value={customer?.referral} />
+            {customer?.customer_id && (
+              <InfoRow label="Stripe ID" value={customer.customer_id} mono copyable />
+            )}
           </Section>
 
           <Separator />
 
           {/* Plan / commercial */}
           <Section icon={TrendingUp} title="Plano & financeiro">
-            <InfoRow label="Plano" value={contact.plan} />
-            <InfoRow label="Status" value={contact.status} />
+            <InfoRow label="Plano" value={planLabel(subscription)} />
+            <InfoRow label="Status" value={subscription?.status} />
             <InfoRow
               label="MRR"
-              value={contact.mrr != null ? formatCurrency(contact.mrr) : null}
+              value={subscription?.mrr != null && subscription.mrr > 0 ? formatCurrency(subscription.mrr) : null}
               highlight
             />
-            {contact.stripe_customer_id && (
-              <InfoRow label="Stripe ID" value={contact.stripe_customer_id} mono copyable />
+            <InfoRow label="Promocode" value={subscription?.promocode} />
+            {subscription?.subscription_id && (
+              <InfoRow label="Subscription ID" value={subscription.subscription_id} mono copyable />
             )}
           </Section>
 
-          {/* Notes */}
-          {contact.notes && (
+          {/* Infra usage */}
+          {infra && (
             <>
               <Separator />
-              <Section icon={FileText} title="Notas">
-                <p className="text-xs text-card-foreground leading-relaxed whitespace-pre-wrap">
-                  {contact.notes}
-                </p>
+              <Section icon={Activity} title="Infraestrutura">
+                <InfoRow label="Status" value={infra.status} />
+                <InfoRow label="Purchase code" value={infra.purchase_code} mono />
+                <InfoRow label="Requests (24h)" value={infra.requests_24h.toLocaleString("pt-BR")} />
+                <InfoRow label="Requests (7d)" value={infra.requests_7d.toLocaleString("pt-BR")} />
+                <InfoRow label="Requests (30d)" value={infra.requests_30d.toLocaleString("pt-BR")} />
               </Section>
             </>
           )}
