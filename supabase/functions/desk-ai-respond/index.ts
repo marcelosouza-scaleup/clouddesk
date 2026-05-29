@@ -10,10 +10,15 @@ interface AIRespondRequest {
   account_email?: string; // passed by widget directly — avoids account table lookup
 }
 
+interface MessageMetadata {
+  quick_replies?: string[];
+}
+
 interface AIRespondResult {
   reply: string | null;
   should_handoff: boolean;
   blocked?: boolean;
+  metadata?: MessageMetadata | null;
 }
 
 interface MessageRow {
@@ -53,17 +58,21 @@ interface ContactCustomer {
 
 interface ContactSubscription {
   subscription_id: string;
-  status: string;
+  status: string;        // normalized: active | canceled | pending | unpaid
+  infra_status: string;  // raw: DEPLOYED | DEPLOYING | STOPPED | BLOCKED
   product: string;
   mrr: number;
   interval: string;
   promocode: string;
+  created_at: string;
 }
 
 interface ContactInfra {
   subscription_id: string;
   infra_id: string;
   purchase_code: string;
+  default_domain: string;
+  status: string;        // raw deployment_status
   requests_24h: number;
   requests_7d: number;
   requests_30d: number;
@@ -82,7 +91,12 @@ const TRANSFER_KEYWORD = '[TRANSFERIR]';
 const BASE_SYSTEM_PROMPT = `Você é Luna, assistente virtual de suporte da Cloudfy, uma empresa SaaS de infraestrutura.
 Seja profissional, amigável e direta. Use linguagem simples e acessível.
 Responda em português do Brasil. Respostas curtas e objetivas (máximo 3 parágrafos).
-Ao final, pergunte se o cliente precisa de mais ajuda.`;
+Ao final, pergunte se o cliente precisa de mais ajuda.
+
+Para reenviar credenciais/senha de acesso, oriente o cliente a usar o botão "Reenviar minhas credenciais" disponível no rodapé do chat.
+
+[OPÇÕES CLICÁVEIS]
+Quando quiser oferecer opções ao usuário, use o formato [OPCOES: Opção 1 | Opção 2 | Opção 3] no final da sua mensagem.`;
 
 // ─── OpenAI helpers ───────────────────────────────────────────────────────────
 
@@ -143,37 +157,43 @@ function buildClientContext(info: ContactInfoResult | null): string {
 
   const { customer, subscriptions, infras } = info;
 
-  const intervalLabel = (i: string) => i === 'month' ? 'Mensal' : i === 'year' ? 'Anual' : i;
+  const formatDate = (iso: string): string => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  };
 
-  const subLines = subscriptions.length > 0
-    ? subscriptions.map((s) => {
-        const infra = infras.find((inf) => inf.subscription_id === s.subscription_id);
-        const infraStr = infra
-          ? `${infra.purchase_code} (24h: ${infra.requests_24h} req, 7d: ${infra.requests_7d} req)`
-          : 'Não provisionada';
-        const statusIcon = s.status === 'active' ? '✅' : '❌';
-        const planLabel = [s.product, s.interval ? intervalLabel(s.interval) : ''].filter(Boolean).join(' · ');
-        return `  ${statusIcon} ${planLabel} — Status: ${s.status}${s.mrr > 0 ? ` — MRR: R$${s.mrr}` : ''}${s.promocode ? ` — Promo: ${s.promocode}` : ''}\n     Infra: ${infraStr}`;
-      }).join('\n')
-    : '  Nenhuma subscription encontrada';
+  const subLines = subscriptions.map((s) => {
+    const infra = infras.find((inf) => inf.subscription_id === s.subscription_id);
+    const date = formatDate(s.created_at);
+    const head = `- ${s.product} | Status: ${s.status} | Desde: ${date}`;
+    const infraLine = infra
+      ? `  Infra: ${infra.default_domain || infra.purchase_code} | Deploy: ${infra.status}`
+      : '';
+    return [head, infraLine].filter(Boolean).join('\n');
+  }).join('\n');
 
   return `
---- CONTEXTO DO CLIENTE ---
+--- DADOS DO CLIENTE ---
 Nome: ${customer.name}
 Email: ${customer.email}
-Stripe ID: ${customer.customer_id}${customer.referral ? `\nReferral: ${customer.referral}` : ''}
-Subscriptions:
-${subLines}
----------------------------
 
---- REGRAS DE COMUNICAÇÃO ---
-- NUNCA mencione valores financeiros como MRR, LTV, receita ou qualquer métrica interna
-- NUNCA mencione nomes de campos internos: MRR, purchase_code, infra_id, customer_id, subscription_id
-- Para se referir ao plano, use apenas: "seu plano Cloud Advanced" ou "sua assinatura"
-- Para se referir ao valor, diga apenas "o valor da sua assinatura" — nunca o número
-- Para se referir à infra, use o purchase_code como apelido amigável se necessário, mas prefira "sua infraestrutura"
-- Tom: prestativo, direto, sem jargão técnico
------------------------------
+Assinaturas:
+${subLines || '(nenhuma assinatura registrada)'}
+------------------------
+
+--- REGRAS SOBRE OS DADOS DO CLIENTE ---
+- Você TEM acesso aos dados reais do cliente acima.
+- Use essas informações para responder com precisão.
+- NUNCA diga que não tem acesso a informações que estão no bloco DADOS DO CLIENTE.
+- Para valores de plano ou preço, diga que não tem essa informação — ela NÃO está nos dados disponíveis.
+- NUNCA INVENTE produtos, planos ou infraestruturas que não estejam listados no bloco DADOS DO CLIENTE. Use SOMENTE os nomes que aparecem ali, EXATAMENTE como estão escritos.
+- Ao listar assinaturas/infras do cliente, copie os nomes e status exatamente do bloco — não os traduza, não os "embeleze", não invente descrições.
+- NUNCA mencione nomes de campos internos: purchase_code, infra_id, customer_id, subscription_id, default_domain.
+- Para se referir à infraestrutura, use o nome (ex.: "sua infraestrutura icyskate") ou apenas "sua infraestrutura".
+- Tom: prestativo, direto, sem jargão técnico.
+-----------------------------------------
 `;
 }
 
@@ -223,11 +243,9 @@ Cumprimente pelo nome e apresente um resumo do que você já sabe sobre ele, no 
 "Olá, ${contactInfo.customer.name}! Vi aqui no seu perfil:
 ${contactInfo.subscriptions.filter(s => s.status === 'active').map(s => {
   const infra = contactInfo.infras.find(i => i.subscription_id === s.subscription_id);
-  const interval = s.interval === 'month' ? 'Mensal' : s.interval === 'year' ? 'Anual' : s.interval;
-  const planStr = [s.product, interval].filter(Boolean).join(' · ');
   return infra
-    ? `• ${planStr} (sua infraestrutura: ${infra.purchase_code})`
-    : `• ${planStr}`;
+    ? `• ${s.product} (sua infraestrutura: ${infra.default_domain || infra.purchase_code})`
+    : `• ${s.product}`;
 }).join('\n')}
 
 Sobre o que você precisa de ajuda hoje?"
@@ -242,13 +260,149 @@ ${clientSection}${contactContext}${firstMessageInstruction}
 ---
 
 [REGRA DE TRANSFERÊNCIA — OBRIGATÓRIA]
-Se o cliente pedir explicitamente para falar com um humano, OU se a dúvida dele NÃO puder ser respondida usando EXCLUSIVAMENTE os conteúdos abaixo, você DEVE responder APENAS com a palavra-chave: ${TRANSFER_KEYWORD}
+Se o cliente pedir explicitamente para falar com um humano, OU se a dúvida NÃO puder ser respondida nem pelo bloco DADOS DO CLIENTE acima nem pela base de conhecimento abaixo, você DEVE responder APENAS com a palavra-chave: ${TRANSFER_KEYWORD}
 Não adicione nenhum texto antes ou depois. Não explique. Só retorne: ${TRANSFER_KEYWORD}
+
+Perguntas que podem ser respondidas pelos DADOS DO CLIENTE (ex.: status de uma infraestrutura, nome do produto, quando foi assinado, quais assinaturas existem) NÃO devem ser transferidas — responda com base nos dados.
 
 ---
 
-[BASE DE CONHECIMENTO — USE APENAS ISTO PARA RESPONDER]
+[BASE DE CONHECIMENTO — FONTE COMPLEMENTAR]
+Use o conteúdo abaixo COMBINADO com o bloco DADOS DO CLIENTE para responder. Os dois são fontes válidas. Se a pergunta for sobre dados específicos do cliente (status da infraestrutura, assinaturas dele etc.), priorize o bloco DADOS DO CLIENTE. Para perguntas gerais ou de como-fazer, use a base de conhecimento.
+
 ${contextSection}`;
+}
+
+// ─── Reply marker parsing ───────────────────────────────────────────────────
+// The model can embed two markers in its reply:
+//   [OPCOES: A | B | C]          → clickable quick-reply chips
+//   [ACTION: resend_credentials] → action button (infra_id injected server-side)
+// Both are stripped from the visible text and lifted into metadata.
+
+const OPCOES_RE = /\[OPCOES:\s*([^\]]+)\]/i;
+
+function parseReplyMarkers(raw: string): { text: string; metadata: MessageMetadata | null } {
+  let text = raw;
+  const metadata: MessageMetadata = {};
+
+  const opcoesMatch = text.match(OPCOES_RE);
+  if (opcoesMatch) {
+    const options = opcoesMatch[1]
+      .split('|')
+      .map((o) => o.trim())
+      .filter(Boolean);
+    if (options.length > 0) metadata.quick_replies = options;
+    text = text.replace(OPCOES_RE, '');
+  }
+
+  text = text.replace(/\n{3,}/g, '\n\n').trim();
+
+  const hasMetadata = !!metadata.quick_replies;
+  return { text, metadata: hasMetadata ? metadata : null };
+}
+
+// ─── Contact info (inlined from get-contact-info) ─────────────────────────────
+// We query the Cloudfy production Supabase directly here instead of HTTP-calling
+// the get-contact-info Edge Function. The Edge gateway rejects internal
+// function-to-function JWT authentication with UNAUTHORIZED_INVALID_JWT_FORMAT
+// when the env exposes a publishable key (sb_publishable_...) rather than the
+// legacy anon JWT. Inlining is faster and avoids that gateway round-trip.
+// READ-ONLY: only .select() against account / infrastructure / products / purchases.
+
+interface InfraQueryRow {
+  id: string;
+  default_domain: string | null;
+  deployment_status: string | null;
+  created_at: string;
+  products: { name: string | null } | null;
+  purchase: {
+    id: string;
+    purchase_code: string | null;
+    stripe_subscription_id: string | null;
+    amount: number | null;
+  } | null;
+}
+
+function normalizeInfraStatus(raw: string | null | undefined): string {
+  if (!raw) return '';
+  const v = String(raw).toUpperCase();
+  if (v === 'DEPLOYED')  return 'active';
+  if (v === 'DEPLOYING') return 'pending';
+  if (v === 'STOPPED')   return 'canceled';
+  if (v === 'BLOCKED')   return 'unpaid';
+  return raw.toLowerCase();
+}
+
+async function fetchContactInfo(email: string): Promise<ContactInfoResult | null> {
+  const prodUrl = Deno.env.get('CLOUDFY_SUPABASE_URL');
+  const prodKey = Deno.env.get('CLOUDFY_SUPABASE_SERVICE_ROLE_KEY');
+  if (!prodUrl || !prodKey) {
+    console.warn('[AI] fetchContactInfo: CLOUDFY_SUPABASE_* secrets missing');
+    return null;
+  }
+
+  const prod = createClient(prodUrl, prodKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  const { data: accRow } = await prod
+    .from('account')
+    .select('id, name, email, stripe_customer_id')
+    .eq('email', email)
+    .maybeSingle();
+
+  const customer: ContactCustomer | null = accRow
+    ? {
+        name:        accRow.name ?? '',
+        email:       accRow.email,
+        customer_id: accRow.stripe_customer_id ?? '',
+        referral:    '',
+      }
+    : null;
+
+  const { data: infraRows } = await prod
+    .from('infrastructure')
+    .select(
+      'id, default_domain, deployment_status, created_at, ' +
+      'products(name), ' +
+      'purchase:purchases!infrastructure_purchase_id_fkey!inner(' +
+        'id, purchase_code, stripe_subscription_id, amount, client_email' +
+      ')',
+    )
+    .eq('purchase.client_email', email)
+    .order('created_at', { ascending: false });
+
+  const rows = (infraRows ?? []) as unknown as InfraQueryRow[];
+
+  const subscriptions: ContactSubscription[] = rows.map((row) => {
+    const subscriptionId = row.purchase?.stripe_subscription_id ?? row.purchase?.id ?? row.id;
+    return {
+      subscription_id: subscriptionId,
+      status:          normalizeInfraStatus(row.deployment_status),
+      infra_status:    row.deployment_status ?? '',
+      product:         row.products?.name ?? '',
+      mrr:             typeof row.purchase?.amount === 'number' ? row.purchase.amount : 0,
+      interval:        '',
+      promocode:       '',
+      created_at:      row.created_at,
+    };
+  });
+
+  const infras: ContactInfra[] = rows.map((row) => {
+    const subscriptionId = row.purchase?.stripe_subscription_id ?? row.purchase?.id ?? row.id;
+    return {
+      subscription_id: subscriptionId,
+      infra_id:        row.id,
+      purchase_code:   row.purchase?.purchase_code ?? row.default_domain ?? '',
+      default_domain:  row.default_domain ?? '',
+      status:          row.deployment_status ?? '',
+      requests_24h:    0,
+      requests_7d:     0,
+      requests_30d:    0,
+    };
+  });
+
+  return { customer, subscriptions, infras };
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
@@ -324,17 +478,7 @@ Deno.serve(async (req) => {
 
         if (!email) return null;
 
-        const res = await fetch(`${supabaseUrl}/functions/v1/get-contact-info`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${supabaseKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ email }),
-        });
-
-        if (!res.ok) return null;
-        return await res.json() as ContactInfoResult;
+        return await fetchContactInfo(email);
       } catch (e) {
         console.warn('[AI] get-contact-info failed:', e instanceof Error ? e.message : e);
         return null;
@@ -355,7 +499,11 @@ Deno.serve(async (req) => {
     ]);
 
     if (historyErr) console.warn('[AI] History fetch failed:', historyErr.message);
-    console.log(`[AI] contact=${contactInfo?.customer?.name ?? 'unknown'}`);
+    console.log(
+      `[AI] contact=${contactInfo?.customer?.name ?? 'unknown'} ` +
+      `subs=${contactInfo?.subscriptions?.length ?? 0} ` +
+      `infras=${contactInfo?.infras?.length ?? 0}`
+    );
 
     const history = ((historyRows ?? []) as MessageRow[]).reverse();
     const isFirstMessage = history.length === 0;
@@ -416,8 +564,16 @@ Deno.serve(async (req) => {
 
     const should_handoff = rawReply.includes(TRANSFER_KEYWORD);
 
+    // Strip the [OPCOES] marker into metadata. On handoff the reply is just the
+    // transfer keyword, so there is nothing to parse.
+    const { text: reply, metadata } = should_handoff
+      ? { text: rawReply, metadata: null }
+      : parseReplyMarkers(rawReply);
+
+    const result: AIRespondResult = { reply, should_handoff, metadata };
+
     return new Response(
-      JSON.stringify({ reply: rawReply, should_handoff }),
+      JSON.stringify(result),
       { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     );
   } catch (err) {

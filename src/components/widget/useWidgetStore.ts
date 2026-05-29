@@ -1,11 +1,13 @@
 import { create } from "zustand";
 import type { WidgetConversation, WidgetMessage, WidgetAccount } from "./types";
+import type { AirtableInfra } from "@/lib/airtable";
 
 interface WidgetState {
   isOpen: boolean;
   account: WidgetAccount | null;
   conversation: WidgetConversation | null;
   messages: WidgetMessage[];
+  infras: AirtableInfra[];
   isTyping: boolean;
   isAiResponding: boolean;
   isWaitingForHuman: boolean;
@@ -18,6 +20,7 @@ interface WidgetState {
   setConversation: (conv: WidgetConversation | null) => void;
   setMessages: (msgs: WidgetMessage[]) => void;
   addMessage: (msg: WidgetMessage) => void;
+  setInfras: (infras: AirtableInfra[]) => void;
   setIsTyping: (v: boolean) => void;
   setIsAiResponding: (v: boolean) => void;
   setIsWaitingForHuman: (v: boolean) => void;
@@ -40,6 +43,7 @@ export const useWidgetStore = create<WidgetState>((set) => ({
   account: null,
   conversation: null,
   messages: [],
+  infras: [],
   isTyping: false,
   isAiResponding: false,
   isWaitingForHuman: false,
@@ -59,6 +63,7 @@ export const useWidgetStore = create<WidgetState>((set) => ({
   setConversation: (conversation) => set({ conversation }),
   setMessages: (messages) => set({ messages }),
   addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg] })),
+  setInfras: (infras) => set({ infras }),
   setIsTyping: (isTyping) => set({ isTyping }),
   setIsAiResponding: (isAiResponding) => set({ isAiResponding }),
   setIsWaitingForHuman: (isWaitingForHuman) => set({ isWaitingForHuman }),

@@ -6,8 +6,9 @@ import { ChatWidgetHeader } from "./ChatWidgetHeader";
 import { ChatWidgetWelcome } from "./ChatWidgetWelcome";
 import { ChatWidgetThread } from "./ChatWidgetThread";
 import { ChatWidgetComposer } from "./ChatWidgetComposer";
+import { WidgetActionBar } from "./WidgetActionBar";
 import { CSATFeedback } from "./CSATFeedback";
-import type { CloudDeskSettings, WidgetMessage } from "./types";
+import type { CloudDeskSettings, WidgetMessage, WidgetMessageMetadata } from "./types";
 import type { ContactInfo } from "@/lib/airtable";
 
 // ── Welcome message builder ────────────────────────────────────────────────────
@@ -96,6 +97,7 @@ interface AIRespondResult {
   reply: string | null;
   should_handoff: boolean;
   blocked?: boolean;
+  metadata?: WidgetMessageMetadata | null;
 }
 
 async function callAiEdgeFunction(
@@ -149,7 +151,8 @@ async function insertMessage(
   conversationId: string,
   senderType: "contact" | "bot" | "system",
   content: string,
-  aiGenerated = false
+  aiGenerated = false,
+  metadata?: WidgetMessageMetadata | null,
 ): Promise<WidgetMessage | null> {
   const { data, error } = await supabase
     .from("desk_messages")
@@ -160,8 +163,9 @@ async function insertMessage(
       ai_generated: aiGenerated,
       content_type: "text",
       is_private_note: false,
+      metadata: metadata ?? {},
     })
-    .select("id, conversation_id, sender_type, content, created_at, ai_generated, is_private_note")
+    .select("id, conversation_id, sender_type, content, created_at, ai_generated, is_private_note, metadata")
     .single();
 
   if (error) {
@@ -190,11 +194,13 @@ export function ChatWidget({ settings, embedUser }: Props) {
     account,
     conversation,
     messages,
+    infras,
     showCsat,
     isAiResponding,
     isWaitingForHuman,
     setConversation,
     addMessage,
+    setInfras,
     setIsAiResponding,
     setIsWaitingForHuman,
   } = useWidgetStore();
@@ -256,7 +262,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
           const handoffMsg = await handleHandoff(convData.id);
           if (handoffMsg) addMessage(handoffMsg);
         } else if (aiResult.reply) {
-          const botMsg = await insertMessage(convData.id, "bot", aiResult.reply, true);
+          const botMsg = await insertMessage(convData.id, "bot", aiResult.reply, true, aiResult.metadata);
           if (botMsg) addMessage(botMsg);
         }
       } catch (err) {
@@ -305,7 +311,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
           const handoffMsg = await handleHandoff(conversation.id);
           if (handoffMsg) addMessage(handoffMsg);
         } else if (aiResult.reply) {
-          const botMsg = await insertMessage(conversation.id, "bot", aiResult.reply, true);
+          const botMsg = await insertMessage(conversation.id, "bot", aiResult.reply, true, aiResult.metadata);
           if (botMsg) addMessage(botMsg);
         }
       } catch (err) {
@@ -355,6 +361,8 @@ export function ChatWidget({ settings, embedUser }: Props) {
           { body: { email } },
         );
 
+        if (contactData?.infras) setInfras(contactData.infras);
+
         const welcomeText = contactData ? buildWelcomeMessage(contactData) : null;
         if (!welcomeText) return;
 
@@ -390,6 +398,34 @@ export function ChatWidget({ settings, embedUser }: Props) {
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
+
+  // ── Load infras for the fixed action bar ────────────────────────────────────
+  // Independent of the welcome flow (which only runs for brand-new conversations).
+  // Ensures the "Reenviar credenciais" bar has the client's infra list whenever
+  // the widget is open with a known email.
+  useEffect(() => {
+    if (!isOpen) return;
+    if (infras.length > 0) return; // already loaded this session
+
+    const email = embedUser?.email ?? account?.email;
+    if (!email) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await supabase.functions.invoke<ContactInfo>(
+          "get-contact-info",
+          { body: { email } },
+        );
+        if (!cancelled && data?.infras) setInfras(data.infras);
+      } catch (err) {
+        console.error("[Widget] Falha ao carregar infras:", err);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, embedUser?.email, account?.email]);
 
   // ── Realtime: detect agent reply while waiting for human ────────────────────
   // When the conversation is in "pending/waiting for human" state and an agent
@@ -443,6 +479,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
           created_at:      String(raw.created_at),
           ai_generated:    raw.ai_generated === true,
           is_private_note: false,
+          metadata:        (raw.metadata ?? null) as WidgetMessage["metadata"],
         };
 
         const store = useWidgetStore.getState();
@@ -523,7 +560,7 @@ export function ChatWidget({ settings, embedUser }: Props) {
         </>
       ) : (
         <>
-          <ChatWidgetThread messages={messages} conversationId={conversation.id} />
+          <ChatWidgetThread messages={messages} conversationId={conversation.id} onSend={handleSend} />
           {showCsat ? (
             <CSATFeedback />
           ) : (
@@ -580,6 +617,9 @@ export function ChatWidget({ settings, embedUser }: Props) {
                   </p>
                 </div>
               )}
+
+              {/* Fixed action bar — always-available quick actions */}
+              <WidgetActionBar infras={infras} />
 
               <ChatWidgetComposer
                 onSend={handleSend}

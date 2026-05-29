@@ -1,42 +1,46 @@
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.98.0';
 import { corsHeaders } from '../_shared/cors.ts';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
+// Same shape as before — consumers (ChatWidget, ClientInfoPanel, desk-ai-respond)
+// keep working without changes. Source of truth swapped from Airtable to the
+// Cloudfy production Supabase (separate project: CLOUDFY_SUPABASE_*).
 
 interface ContactInfoRequest {
   email: string;
-}
-
-interface AirtableRecord {
-  id: string;
-  fields: Record<string, unknown>;
-}
-
-interface AirtableResponse {
-  records?: AirtableRecord[];
 }
 
 interface CustomerInfo {
   name: string;
   email: string;
   customer_id: string; // Stripe cus_...
-  referral: string;    // from first subscription — Customers table has no Referral column
+  referral: string;    // not stored in the new schema — kept as "" for contract compatibility
 }
 
+/**
+ * One row per provisioned infrastructure (1:1 with infras[] below). Each entry
+ * IS a subscription in the new model — purchases are no longer the source of
+ * truth, because a single subscription can have multiple purchase records
+ * (renewals, upgrades) that would otherwise duplicate in the UI.
+ */
 interface SubscriptionInfo {
-  subscription_id: string;
-  status: string;   // active | trialing | canceled | internal
-  product: string;  // ex: "Cloud Advanced"
-  mrr: number;
-  interval: string; // month | year
-  promocode: string;
-  created_at: string; // ISO 8601 from Airtable "Created At" field
+  subscription_id: string; // stripe_subscription_id from the parent purchase, or purchase.id as fallback
+  status: string;          // normalized for legacy consumers: active | canceled | pending | unpaid
+  infra_status: string;    // original deployment_status: DEPLOYED | DEPLOYING | STOPPED | BLOCKED
+  product: string;         // products.name (joined via infrastructure.product_id)
+  mrr: number;             // purchase.amount when present, else 0
+  interval: string;        // not stored — empty
+  promocode: string;       // not stored — empty
+  created_at: string;      // infrastructure.created_at
 }
 
 interface InfraInfo {
-  subscription_id: string; // which subscription this infra belongs to
-  infra_id: string;
-  purchase_code: string;
-  requests_24h: number;
+  subscription_id: string; // same value as SubscriptionInfo[i].subscription_id (1:1)
+  infra_id: string;        // infrastructure.id
+  purchase_code: string;   // from the parent purchase
+  default_domain: string;  // infrastructure.default_domain (e.g. "iconicmillipede")
+  status: string;          // raw deployment_status (DEPLOYED | DEPLOYING | STOPPED | BLOCKED)
+  requests_24h: number;    // not tracked — 0
   requests_7d: number;
   requests_30d: number;
 }
@@ -45,168 +49,54 @@ interface ContactInfoResult {
   customer: CustomerInfo | null;
   subscriptions: SubscriptionInfo[];
   infras: InfraInfo[];
-  airtable_limited?: boolean;
 }
 
-// ─── Config ─────────────────────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
-const TABLE_CUSTOMERS     = 'Customers';
-const TABLE_SUBSCRIPTIONS = 'Subscriptions';
-const TABLE_INFRAS        = 'Infras';
-
-const REQUEST_TIMEOUT_MS = 8_000;
-
-// Sentinel: signals an HTTP 429 from Airtable without throwing.
-const RATE_LIMITED = Symbol('rate_limited');
-
-type FieldsWithId = Record<string, unknown> & { _recordId: string };
-type FetchResult  = FieldsWithId | null | typeof RATE_LIMITED;
-type FetchAllResult = FieldsWithId[] | typeof RATE_LIMITED;
-
-// ─── Field helpers ──────────────────────────────────────────────────────────
-// Lookup/linked fields in Airtable come back as arrays — unwrap the first value.
-
-function str(fields: Record<string, unknown>, key: string): string {
-  const v = fields[key];
-  if (v == null) return '';
-  if (Array.isArray(v)) return v.length > 0 ? String(v[0]) : '';
-  return String(v);
+/**
+ * Maps Cloudfy's `infrastructure.deployment_status` to the legacy Stripe-style
+ * status that existing consumers filter by (`s.status === 'active'`).
+ *
+ *   DEPLOYED  → active   (running and serving traffic)
+ *   DEPLOYING → pending  (being provisioned, ~20 min)
+ *   STOPPED   → canceled (cancelled and destroyed)
+ *   BLOCKED   → unpaid   (blocked, usually due to payment)
+ *
+ * The original value is also returned separately via `infra_status` so the UI
+ * can show the precise label / explanation per state.
+ */
+function normalizeStatus(raw: string | null | undefined): string {
+  if (!raw) return '';
+  const v = String(raw).toUpperCase();
+  if (v === 'DEPLOYED')  return 'active';
+  if (v === 'DEPLOYING') return 'pending';
+  if (v === 'STOPPED')   return 'canceled';
+  if (v === 'BLOCKED')   return 'unpaid';
+  return raw.toLowerCase();
 }
 
-function num(fields: Record<string, unknown>, key: string): number {
-  const v = fields[key];
-  if (v == null) return 0;
-  const raw = Array.isArray(v) ? (v.length > 0 ? v[0] : null) : v;
-  if (raw == null) return 0;
-  // Strip currency formatting ("R$82,50", "U$15.00") → number
-  const cleaned = typeof raw === 'string'
-    ? raw.replace(/[^\d.,-]/g, '').replace(/\.(?=\d{3}(\D|$))/g, '').replace(',', '.')
-    : raw;
-  const n = Number(cleaned);
-  return Number.isFinite(n) ? n : 0;
+// Row shapes returned by the SELECT queries. Narrow what we read so a schema
+// change elsewhere can't silently break us.
+
+interface AccountRow {
+  id: string;
+  name: string | null;
+  email: string;
+  stripe_customer_id: string | null;
 }
 
-// ─── Field mappers ──────────────────────────────────────────────────────────
-// Column names verified live against the real Airtable base on 2026-05-28.
-//
-// Customers:     email, name, customer_id (Stripe cus_...)
-// Subscriptions: Subscription ID, Status, Products (array), MRR, Interval,
-//                Promocode, Referral, Email (array)
-// Infras:        infra_id, purchase_code, Subscription (linked record array),
-//                requests_24h, requests_7d, requests_30d
-
-function mapCustomer(fields: Record<string, unknown>, referral: string): CustomerInfo {
-  return {
-    name:        str(fields, 'name'),
-    email:       str(fields, 'email'),
-    customer_id: str(fields, 'customer_id'),
-    referral,
-  };
-}
-
-function mapSubscription(fields: Record<string, unknown>): SubscriptionInfo {
-  return {
-    subscription_id: str(fields, 'Subscription ID'),
-    status:          str(fields, 'Status'),
-    product:         str(fields, 'Products'),  // array — str() unwraps first element
-    mrr:             num(fields, 'MRR'),
-    interval:        str(fields, 'Interval'),
-    promocode:       str(fields, 'Promocode'),
-    created_at:      str(fields, 'Created At'),
-  };
-}
-
-function mapInfra(fields: Record<string, unknown>, subscriptionId: string): InfraInfo {
-  return {
-    subscription_id: subscriptionId,
-    infra_id:        str(fields, 'infra_id'),
-    purchase_code:   str(fields, 'purchase_code'),
-    requests_24h:    num(fields, 'requests_24h'),
-    requests_7d:     num(fields, 'requests_7d'),
-    requests_30d:    num(fields, 'requests_30d'),
-  };
-}
-
-// ─── Airtable fetch helpers ──────────────────────────────────────────────────
-
-/** Escapes a value for safe interpolation inside an Airtable filterByFormula. */
-function esc(value: string): string {
-  return value.replace(/"/g, '\\"');
-}
-
-function buildUrl(baseId: string, table: string, params: {
-  filter: string;
-  maxRecords?: number;
-  sortField?: string;
-  sortDir?: 'asc' | 'desc';
-}): string {
-  let url =
-    `https://api.airtable.com/v0/${baseId}/${encodeURIComponent(table)}` +
-    `?filterByFormula=${encodeURIComponent(params.filter)}`;
-  if (params.maxRecords) url += `&maxRecords=${params.maxRecords}`;
-  if (params.sortField) {
-    url += `&sort[0][field]=${encodeURIComponent(params.sortField)}`;
-    url += `&sort[0][direction]=${params.sortDir ?? 'desc'}`;
-  }
-  return url;
-}
-
-async function airtableFetch(url: string, apiKey: string): Promise<Response | typeof RATE_LIMITED | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, {
-      headers: { 'Authorization': `Bearer ${apiKey}` },
-      signal: controller.signal,
-    });
-    if (res.status === 429) return RATE_LIMITED;
-    if (!res.ok) {
-      console.error(`[get-contact-info] Airtable error ${res.status} for ${url.split('?')[0]}`);
-      return null;
-    }
-    return res;
-  } catch (err) {
-    const reason = err instanceof Error && err.name === 'AbortError'
-      ? `timeout after ${REQUEST_TIMEOUT_MS}ms`
-      : (err instanceof Error ? err.message : 'unknown');
-    console.error(`[get-contact-info] fetch failed: ${reason}`);
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/** Fetches the first matching record. Returns FieldsWithId, null, or RATE_LIMITED. */
-async function fetchFirstRecord(
-  baseId: string,
-  apiKey: string,
-  table: string,
-  filter: string,
-  sortField?: string,
-): Promise<FetchResult> {
-  const url = buildUrl(baseId, table, { filter, maxRecords: 1, sortField });
-  const res = await airtableFetch(url, apiKey);
-  if (res === RATE_LIMITED) return RATE_LIMITED;
-  if (!res) return null;
-  const data: AirtableResponse = await res.json();
-  const rec = data.records?.[0];
-  return rec ? { ...rec.fields, _recordId: rec.id } : null;
-}
-
-/** Fetches ALL matching records (up to 100). Returns FieldsWithId[], or RATE_LIMITED. */
-async function fetchAllRecords(
-  baseId: string,
-  apiKey: string,
-  table: string,
-  filter: string,
-  sortField?: string,
-): Promise<FetchAllResult> {
-  const url = buildUrl(baseId, table, { filter, maxRecords: 100, sortField, sortDir: 'desc' });
-  const res = await airtableFetch(url, apiKey);
-  if (res === RATE_LIMITED) return RATE_LIMITED;
-  if (!res) return [];
-  const data: AirtableResponse = await res.json();
-  return (data.records ?? []).map((r) => ({ ...r.fields, _recordId: r.id }));
+interface InfrastructureRow {
+  id: string;
+  default_domain: string | null;
+  deployment_status: string | null;
+  created_at: string;
+  products: { name: string | null } | null;
+  purchase: {
+    id: string;
+    purchase_code: string | null;
+    stripe_subscription_id: string | null;
+    amount: number | null;
+  } | null;
 }
 
 // ─── Handler ────────────────────────────────────────────────────────────────
@@ -226,95 +116,100 @@ Deno.serve(async (req) => {
       );
     }
 
-    const apiKey = Deno.env.get('AIRTABLE_API_KEY');
-    const baseId = Deno.env.get('AIRTABLE_BASE_ID');
-
-    if (!apiKey || !baseId) {
-      console.error('[get-contact-info] Missing Airtable credentials');
+    const prodUrl = Deno.env.get('CLOUDFY_SUPABASE_URL');
+    const prodKey = Deno.env.get('CLOUDFY_SUPABASE_SERVICE_ROLE_KEY');
+    if (!prodUrl || !prodKey) {
+      console.error('[get-contact-info] Missing CLOUDFY_SUPABASE_* secrets');
       return new Response(
         JSON.stringify({ error: 'Server configuration error' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
 
-    let airtableLimited = false;
+    // Separate client pointing at the Cloudfy production database. READ-ONLY usage.
+    const prodClient = createClient(prodUrl, prodKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
 
-    // ── RT1: Customer (by email) ─────────────────────────────────────────────
-    const customerFields = await fetchFirstRecord(
-      baseId, apiKey, TABLE_CUSTOMERS,
-      `{email}="${esc(email)}"`,
-    );
-    if (customerFields === RATE_LIMITED) airtableLimited = true;
+    // ── 1) account by email ────────────────────────────────────────────────
+    const { data: accRow, error: accErr } = await prodClient
+      .from('account')
+      .select('id, name, email, stripe_customer_id')
+      .eq('email', email)
+      .maybeSingle<AccountRow>();
 
-    const customerOk = customerFields && customerFields !== RATE_LIMITED;
-
-    // ── RT2: ALL Subscriptions for this email, newest first ──────────────────
-    // Ordered: active ones naturally sort to top when combined with Created At desc
-    // because active subscriptions tend to be newer — but we return all so the
-    // AI can list them explicitly (active ✅, canceled ❌, etc.)
-    let subRecords: FieldsWithId[] = [];
-    if (customerOk) {
-      const subResult = await fetchAllRecords(
-        baseId, apiKey, TABLE_SUBSCRIPTIONS,
-        `{Email}="${esc(email)}"`,
-        'Created At',
-      );
-      if (subResult === RATE_LIMITED) {
-        airtableLimited = true;
-      } else {
-        subRecords = subResult;
-      }
+    if (accErr) {
+      console.error('[get-contact-info] account error:', accErr.message);
     }
 
-    console.log(`[get-contact-info] ${email} → ${subRecords.length} subscription(s)`);
-
-    // Referral from the first (most recent) subscription
-    const referral = subRecords.length > 0 ? str(subRecords[0], 'Referral') : '';
-    const customer = customerOk
-      ? mapCustomer(customerFields as Record<string, unknown>, referral)
+    const customer: CustomerInfo | null = accRow
+      ? {
+          name:        accRow.name ?? '',
+          email:       accRow.email,
+          customer_id: accRow.stripe_customer_id ?? '',
+          referral:    '', // not stored in the new schema
+        }
       : null;
 
-    const subscriptions = subRecords.map((r) => mapSubscription(r as Record<string, unknown>));
+    // ── 2) infrastructure for this client, with parent purchase + product ───
+    // Source of truth: one row per provisioned infra. Filters by
+    // purchase.client_email through an inner-joined embed, so we don't have to
+    // fetch purchases first. The FK between infrastructure and purchases is
+    // ambiguous (two FKs exist) — we disambiguate with
+    // `infrastructure_purchase_id_fkey` (the many-to-one "belongs to" link).
+    const { data: infraRows, error: infraErr } = await prodClient
+      .from('infrastructure')
+      .select(
+        'id, default_domain, deployment_status, created_at, ' +
+        'products(name), ' +
+        'purchase:purchases!infrastructure_purchase_id_fkey!inner(' +
+          'id, purchase_code, stripe_subscription_id, amount, client_email' +
+        ')',
+      )
+      .eq('purchase.client_email', email)
+      .order('created_at', { ascending: false })
+      .returns<InfrastructureRow[]>();
 
-    // ── RT3: ALL Infras for this email in one request ────────────────────────
-    // Filtering linked-record columns (Subscription) by record ID is not supported
-    // in Airtable filterByFormula. Instead, fetch all infras for this email via the
-    // lookup field "email (from customer_id) (from Subscription)", then cross-reference
-    // each infra's Subscription array (contains the Airtable record ID) against the
-    // subscription records we already fetched.
-    let infras: InfraInfo[] = [];
-    if (subRecords.length > 0) {
-      const infraResult = await fetchAllRecords(
-        baseId, apiKey, TABLE_INFRAS,
-        `{email (from customer_id) (from Subscription)}="${esc(email)}"`,
-      );
-
-      if (infraResult === RATE_LIMITED) {
-        airtableLimited = true;
-      } else {
-        infras = infraResult
-          .map((infraFields) => {
-            // {Subscription} is an array containing the Airtable record ID of the linked subscription
-            const subRecordIdArr = infraFields['Subscription'];
-            const subRecordId = Array.isArray(subRecordIdArr) ? subRecordIdArr[0] : subRecordIdArr;
-
-            // Find the matching subscription by its Airtable record ID
-            const matchedSub = subRecords.find((s) => s._recordId === subRecordId);
-            const subscriptionId = matchedSub
-              ? str(matchedSub as Record<string, unknown>, 'Subscription ID')
-              : String(subRecordId ?? '');
-
-            return mapInfra(infraFields as Record<string, unknown>, subscriptionId);
-          })
-          .filter((i): i is InfraInfo => i.infra_id !== '' || i.purchase_code !== '');
-      }
+    if (infraErr) {
+      console.error('[get-contact-info] infrastructure error:', infraErr.message);
     }
 
-    console.log(`[get-contact-info] ${email} → ${infras.length} infra(s)`);
+    const rows = infraRows ?? [];
+
+    // Build both arrays from the same source — guarantees 1:1 alignment by index.
+    const subscriptions: SubscriptionInfo[] = rows.map((row) => {
+      const subscriptionId = row.purchase?.stripe_subscription_id ?? row.purchase?.id ?? row.id;
+      return {
+        subscription_id: subscriptionId,
+        status:          normalizeStatus(row.deployment_status),
+        infra_status:    row.deployment_status ?? '',
+        product:         row.products?.name ?? '',
+        mrr:             typeof row.purchase?.amount === 'number' ? row.purchase.amount : 0,
+        interval:        '',
+        promocode:       '',
+        created_at:      row.created_at,
+      };
+    });
+
+    const infras: InfraInfo[] = rows.map((row) => {
+      const subscriptionId = row.purchase?.stripe_subscription_id ?? row.purchase?.id ?? row.id;
+      return {
+        subscription_id: subscriptionId,
+        infra_id:        row.id,
+        purchase_code:   row.purchase?.purchase_code ?? row.default_domain ?? '',
+        default_domain:  row.default_domain ?? '',
+        status:          row.deployment_status ?? '',
+        requests_24h:    0,
+        requests_7d:     0,
+        requests_30d:    0,
+      };
+    });
+
+    console.log(
+      `[get-contact-info] ${email} → ${subscriptions.length} subscription(s), ${infras.length} infra(s)`,
+    );
 
     const result: ContactInfoResult = { customer, subscriptions, infras };
-    if (airtableLimited) result.airtable_limited = true;
-
     return new Response(
       JSON.stringify(result),
       { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },

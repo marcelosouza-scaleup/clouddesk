@@ -16,6 +16,10 @@ export interface WidgetConversation {
   subject: string | null;
 }
 
+export interface WidgetMessageMetadata {
+  quick_replies?: string[];
+}
+
 export interface WidgetMessage {
   id: string;
   conversation_id: string;
@@ -24,6 +28,7 @@ export interface WidgetMessage {
   created_at: string;
   ai_generated: boolean;
   is_private_note: boolean;
+  metadata?: WidgetMessageMetadata | null;
 }
 
 export interface WidgetAccount {
