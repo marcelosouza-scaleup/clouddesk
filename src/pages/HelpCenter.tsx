@@ -295,6 +295,17 @@ const MD_COMPONENTS: Components = {
     return <code className="bg-muted text-primary rounded px-1.5 py-0.5 text-[13px] font-mono" {...rest}>{children}</code>;
   },
   pre:        ({ children }) => <pre className="mb-4 rounded-lg overflow-hidden">{children}</pre>,
+  // Prints colados no editor: nunca estouram a coluna e abrem em tamanho real.
+  img: ({ src, alt }) => (
+    <a href={src} target="_blank" rel="noopener noreferrer" className="block my-4">
+      <img
+        src={src}
+        alt={alt ?? ""}
+        loading="lazy"
+        className="max-w-full h-auto rounded-lg border border-border"
+      />
+    </a>
+  ),
   blockquote: ({ children }) => <CalloutBlockquote>{children}</CalloutBlockquote>,
   hr:         () => <hr className="border-border my-6" />,
   table: ({ children }) => (

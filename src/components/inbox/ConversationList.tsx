@@ -550,17 +550,30 @@ function ConversationItem({
           {/* Checkbox overlay */}
           <div
             data-checkbox
+            role="checkbox"
+            aria-checked={isSelected}
+            aria-label={`Selecionar conversa de ${name}`}
+            tabIndex={showCheckbox ? 0 : -1}
             onClick={(e) => { e.stopPropagation(); onToggle(); }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                e.stopPropagation();
+                onToggle();
+              }
+            }}
             className={cn(
-              "absolute inset-0 flex items-center justify-center rounded-full transition-opacity z-10",
-              showCheckbox ? "opacity-100" : "opacity-0"
+              "absolute inset-0 flex items-center justify-center rounded-full transition-opacity z-10 cursor-pointer",
+              showCheckbox ? "opacity-100" : "opacity-0 pointer-events-none"
             )}
           >
+            {/* Apenas visual — o clique é tratado pelo wrapper [data-checkbox]
+                acima. Ter onCheckedChange aqui causaria toggle duplo. */}
             <Checkbox
               checked={isSelected}
-              onCheckedChange={() => onToggle()}
-              className="h-4 w-4 bg-card border-muted-foreground"
-              aria-label={`Selecionar conversa de ${name}`}
+              tabIndex={-1}
+              className="h-4 w-4 bg-card border-muted-foreground pointer-events-none"
+              aria-hidden
             />
           </div>
 
