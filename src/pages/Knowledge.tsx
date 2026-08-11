@@ -3,12 +3,12 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAuthStore } from "@/stores/authStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetFooter } from "@/components/ui/sheet";
+import { MarkdownImageTextarea } from "@/components/knowledge/MarkdownImageTextarea";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -609,8 +609,13 @@ export default function Knowledge() {
             <div className="space-y-1.5 flex flex-col">
               <label className="text-xs font-medium text-foreground">Conteúdo <span className="text-rose-500">*</span></label>
               <p className="text-[10px] text-muted-foreground">Suporta Markdown. Este conteúdo é indexado semanticamente pela IA.</p>
-              <Textarea placeholder="Escreva o conteúdo do artigo em Markdown..." value={form.content} onChange={(e) => setForm((f) => ({ ...f, content: e.target.value }))} className="min-h-[300px] resize-y font-mono text-sm leading-relaxed" />
-              <p className="text-[10px] text-muted-foreground text-right">{form.content.length} caracteres</p>
+              <MarkdownImageTextarea
+                value={form.content}
+                onChange={(content) => setForm((f) => ({ ...f, content }))}
+                articleId={editing?.id}
+                placeholder="Escreva o conteúdo do artigo em Markdown..."
+                className="min-h-[300px] resize-y font-mono text-sm leading-relaxed"
+              />
             </div>
             <Separator />
             <div className="flex items-center justify-between">
@@ -653,8 +658,13 @@ export default function Knowledge() {
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-foreground">Conteúdo <span className="text-rose-500">*</span></label>
               <p className="text-[10px] text-muted-foreground">Texto curto e direto que a IA usará como referência em respostas.</p>
-              <Textarea placeholder="Ex: Para reiniciar o N8N, execute: docker restart n8n" value={snippetForm.content} onChange={(e) => setSnippetForm((f) => ({ ...f, content: e.target.value }))} className="min-h-[180px] resize-y text-sm leading-relaxed" />
-              <p className="text-[10px] text-muted-foreground text-right">{snippetForm.content.length} caracteres</p>
+              <MarkdownImageTextarea
+                value={snippetForm.content}
+                onChange={(content) => setSnippetForm((f) => ({ ...f, content }))}
+                articleId={editingSnippet?.id}
+                placeholder="Ex: Para reiniciar o N8N, execute: docker restart n8n"
+                className="min-h-[180px] resize-y text-sm leading-relaxed"
+              />
             </div>
           </div>
           <SheetFooter className="px-6 py-4 border-t border-border shrink-0 flex items-center justify-between gap-2">
