@@ -6,6 +6,8 @@ import { supabase } from "@/integrations/supabase/client";
 export type ConversationStatus = "open" | "pending" | "snoozed" | "resolved";
 export type ConversationPriority = "low" | "medium" | "high" | "urgent";
 export type ConversationChannel = "chat" | "email";
+/** Ordem da lista da inbox: "desc" = mais recentes primeiro, "asc" = mais antigas primeiro. */
+export type SortDirection = "desc" | "asc";
 
 export interface ConversationContact {
   user_id: string;
@@ -39,6 +41,9 @@ export interface Conversation {
   tags: string[] | null;
   created_at: string;
   updated_at: string;
+  /** Horário da última mensagem (não-nota). É a chave de ordenação da inbox e o
+   *  mesmo valor exibido em cada linha — ver migration 20260812000000. */
+  last_message_at: string | null;
   // Enriched client-side
   contact?: ConversationContact;
   last_message?: ConversationLastMessage;
@@ -69,6 +74,8 @@ interface InboxState {
   /** Resultados da busca global (todas as conversas, qualquer status). */
   searchResults: Conversation[];
   isSearching: boolean;
+  /** Ordenação da lista por última atividade (last_message_at). Persistida em localStorage. */
+  sortDirection: SortDirection;
 
   // Actions
   setActiveTab: (tab: ConversationStatus, clearPriority?: boolean) => void;
@@ -76,6 +83,8 @@ interface InboxState {
   setSearchQuery: (q: string) => void;
   /** Busca global no banco por nome/e-mail/assunto, em qualquer status. */
   searchConversations: (query: string) => Promise<void>;
+  /** Troca a ordem da lista e recarrega a aba atual (invalida o cache). */
+  setSortDirection: (direction: SortDirection) => void;
   setPriorityFilter: (priority: ConversationPriority | null) => void;
   setPriorityInFilter: (priorities: ConversationPriority[] | null) => void;
   /** Aplica uma Visualização (status + prioridade + plano) de forma atômica e carrega. */
@@ -92,6 +101,50 @@ interface InboxState {
 }
 
 const CACHE_TTL_MS = 30_000; // 30 seconds
+
+// ─── Persistência da ordenação ────────────────────────────────────────────────
+// A preferência de ordem acompanha o operador entre sessões (como no Intercom),
+// então mora no localStorage — não é estado de servidor.
+
+const SORT_STORAGE_KEY = "clouddesk:inbox-sort";
+
+function readStoredSort(): SortDirection {
+  try {
+    return localStorage.getItem(SORT_STORAGE_KEY) === "asc" ? "asc" : "desc";
+  } catch {
+    return "desc";
+  }
+}
+
+function persistSort(direction: SortDirection) {
+  try {
+    localStorage.setItem(SORT_STORAGE_KEY, direction);
+  } catch {
+    /* localStorage indisponível (modo privado) — a ordem vale só para a sessão */
+  }
+}
+
+/** Coluna de ordenação da inbox — a mesma que o item da lista exibe. */
+const SORT_COLUMN = "last_message_at";
+
+/**
+ * Horário de atividade de uma conversa. Prefere a última mensagem já carregada
+ * pelo enrich (mais fresca que a coluna quando o realtime acabou de chegar),
+ * cai para a coluna e, por fim, para created_at — conversas sem mensagem nenhuma
+ * não podem virar NaN e bagunçar o sort.
+ */
+function activityTime(c: Conversation): number {
+  const stamp = c.last_message?.created_at ?? c.last_message_at ?? c.created_at;
+  return new Date(stamp).getTime();
+}
+
+/** Ordena por atividade (última mensagem) respeitando a direção escolhida. */
+function sortByActivity(list: Conversation[], direction: SortDirection): Conversation[] {
+  return [...list].sort((a, b) => {
+    const diff = activityTime(a) - activityTime(b);
+    return direction === "asc" ? diff : -diff;
+  });
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -204,6 +257,7 @@ export const useInboxStore = create<InboxState>((set, get) => ({
   _tabCache:            {},
   searchResults:        [],
   isSearching:          false,
+  sortDirection:        readStoredSort(),
 
   // ── Tab switching ────────────────────────────────────────────────────────────
   setActiveTab: (tab, clearPriority = false) => {
@@ -272,7 +326,7 @@ export const useInboxStore = create<InboxState>((set, get) => ({
       .select("*")
       .or(ors.join(","))
       .neq("status", "merged")  // conversas mescladas não aparecem na busca
-      .order("updated_at", { ascending: false })
+      .order(SORT_COLUMN, { ascending: get().sortDirection === "asc", nullsFirst: false })
       .limit(50);
 
     if (error || !data) {
@@ -283,6 +337,22 @@ export const useInboxStore = create<InboxState>((set, get) => ({
 
     const enriched = await enrichConversations(data as Record<string, unknown>[]);
     set({ searchResults: enriched, isSearching: false });
+  },
+
+  // ── Ordenação (mais recentes ⇄ mais antigas) ──────────────────────────────────
+  // O cache por aba guarda a lista já ordenada, então trocar a direção invalida
+  // tudo e força um reload — senão a aba seguinte voltaria com a ordem antiga.
+  setSortDirection: (direction) => {
+    if (get().sortDirection === direction) return;
+    persistSort(direction);
+    set((s) => ({
+      sortDirection: direction,
+      conversations: sortByActivity(s.conversations, direction),
+      searchResults: sortByActivity(s.searchResults, direction),
+      _tabCache: {},
+    }));
+    const { activeTab, priorityFilter } = get();
+    get().loadConversations(activeTab, priorityFilter, true);
   },
 
   // priorityFilter e priorityInFilter são mutuamente exclusivos.
@@ -309,7 +379,7 @@ export const useInboxStore = create<InboxState>((set, get) => ({
 
   // ── Load conversations for a tab ─────────────────────────────────────────────
   loadConversations: async (status, priority, force = false) => {
-    const { _tabCache, priorityInFilter, planFilter } = get();
+    const { _tabCache, priorityInFilter, planFilter, sortDirection } = get();
     const hasFilter = !!priority || (priorityInFilter?.length ?? 0) > 0 || !!planFilter;
 
     // Honour cache unless forced. Filtered loads bypass the cache entirely
@@ -328,7 +398,9 @@ export const useInboxStore = create<InboxState>((set, get) => ({
     let query = supabase
       .from("desk_conversations")
       .select("*")
-      .order("updated_at", { ascending: false })  // most recently active first
+      // Ordena pela última mensagem — mesmo horário mostrado na linha da lista.
+      // "desc" = atividade mais recente primeiro; "asc" = mais antigas primeiro.
+      .order(SORT_COLUMN, { ascending: sortDirection === "asc", nullsFirst: false })
       .limit(100);
     query = status === "open"
       ? query.in("status", ["open", "pending"])
@@ -385,7 +457,7 @@ export const useInboxStore = create<InboxState>((set, get) => ({
 
   // ── Realtime upsert ──────────────────────────────────────────────────────────
   upsertConversation: async (raw) => {
-    const { activeTab, activeConversationId, conversations, _tabCache } = get();
+    const { activeTab, activeConversationId, conversations, _tabCache, sortDirection } = get();
     const enriched = await enrichOne(raw);
     const incomingStatus = enriched.status;
 
@@ -416,14 +488,13 @@ export const useInboxStore = create<InboxState>((set, get) => ({
 
     // Status matches current tab — add or update
     const exists = conversations.some((c) => c.id === enriched.id);
-    const updated = exists
+    const merged = exists
       ? conversations.map((c) => (c.id === enriched.id ? enriched : c))
       : [enriched, ...conversations];
 
-    // Sort by updated_at DESC to keep most recently active at top
-    updated.sort(
-      (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-    );
+    // Reordena respeitando a direção escolhida pelo operador (a posição correta
+    // de uma conversa nova depende da ordem: topo em "desc", fim em "asc").
+    const updated = sortByActivity(merged, sortDirection);
 
     set({
       conversations: updated,

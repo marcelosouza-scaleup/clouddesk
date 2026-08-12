@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { useInboxStore, statusMatchesTab, type ConversationStatus, type Conversation } from "@/stores/useInboxStore";
+import { useInboxStore, statusMatchesTab, type ConversationStatus, type Conversation, type SortDirection } from "@/stores/useInboxStore";
 import { useAuthStore } from "@/stores/authStore";
 import { useNotifications } from "@/hooks/useNotifications";
 import { Input } from "@/components/ui/input";
@@ -8,9 +8,9 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { MessageSquare, Mail, Bot, User, Search, UserRound, CheckCircle, X, Clock, ChevronDown, Inbox as InboxIcon, Moon, Check } from "lucide-react";
+import { MessageSquare, Mail, Bot, User, Search, UserRound, CheckCircle, X, Clock, ChevronDown, Inbox as InboxIcon, Moon, Check, ArrowDownWideNarrow, ArrowUpNarrowWide } from "lucide-react";
 import { differenceInSeconds } from "date-fns";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -27,6 +27,16 @@ const STATUS_FILTERS: { value: ConversationStatus; label: string; icon: typeof I
   { value: "pending",  label: "Aguardando humano", icon: User        },
   { value: "snoozed",  label: "Pausado",           icon: Moon        },
   { value: "resolved", label: "Resolvido",         icon: CheckCircle },
+];
+
+// ─── Ordenação por última atividade ────────────────────────────────────────────
+// Mesma semântica do Intercom: "Última atividade" é sempre o horário da última
+// mensagem (desk_conversations.last_message_at) — o mesmo valor exibido na linha.
+// O que muda é a direção: decrescente = atividade mais recente no topo.
+
+const SORT_OPTIONS: { value: SortDirection; label: string; hint: string; icon: typeof ArrowDownWideNarrow }[] = [
+  { value: "desc", label: "Mais recentes primeiro", hint: "Última atividade · decrescente", icon: ArrowDownWideNarrow },
+  { value: "asc",  label: "Mais antigas primeiro",  hint: "Última atividade · crescente",   icon: ArrowUpNarrowWide  },
 ];
 
 /** Contagem por filtro: "Aberto" soma open + pending (grupo estilo Intercom). */
@@ -146,6 +156,8 @@ export function ConversationList() {
     tabCounts,
     searchResults,
     isSearching,
+    sortDirection,
+    setSortDirection,
     setActiveTab,
     setActiveConversationId,
     setSearchQuery,
@@ -157,6 +169,7 @@ export function ConversationList() {
   } = useInboxStore();
 
   const isSearchMode = searchQuery.trim().length >= 2;
+  const activeSort = SORT_OPTIONS.find((o) => o.value === sortDirection) ?? SORT_OPTIONS[0];
 
   const agent = useAuthStore((s) => s.agent);
   const [mineOnly, setMineOnly]   = useState(false);
@@ -391,12 +404,54 @@ export function ConversationList() {
           </DropdownMenuContent>
         </DropdownMenu>
 
-        {/* Não lidas (só na visão Aberto) */}
-        {activeTab === "open" && unreadCount > 0 && (
-          <Badge className="bg-unread-badge text-white text-[9px] px-1.5 py-0 h-4 min-w-4 justify-center hover:bg-unread-badge">
-            {unreadCount} não lida{unreadCount > 1 ? "s" : ""}
-          </Badge>
-        )}
+        <div className="flex items-center gap-1.5">
+          {/* Não lidas (só na visão Aberto) */}
+          {activeTab === "open" && unreadCount > 0 && (
+            <Badge className="bg-unread-badge text-white text-[9px] px-1.5 py-0 h-4 min-w-4 justify-center hover:bg-unread-badge">
+              {unreadCount} não lida{unreadCount > 1 ? "s" : ""}
+            </Badge>
+          )}
+
+          {/* Ordenação por última atividade (crescente ⇄ decrescente) */}
+          <DropdownMenu>
+            <TooltipProvider delayDuration={200}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      aria-label={`Ordenar conversas — ${activeSort.label}`}
+                      className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-surface hover:text-foreground transition-colors"
+                    >
+                      <activeSort.icon className="h-4 w-4" />
+                    </button>
+                  </DropdownMenuTrigger>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="text-xs">
+                  {activeSort.label}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+            <DropdownMenuContent align="end" className="w-60">
+              <DropdownMenuLabel className="text-[11px] font-medium text-muted-foreground">
+                Ordenar por última atividade
+              </DropdownMenuLabel>
+              {SORT_OPTIONS.map((opt) => (
+                <DropdownMenuItem
+                  key={opt.value}
+                  onClick={() => setSortDirection(opt.value)}
+                  className="gap-2"
+                >
+                  <opt.icon className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[12px] leading-tight">{opt.label}</p>
+                    <p className="text-[10px] text-muted-foreground leading-tight">{opt.hint}</p>
+                  </div>
+                  {sortDirection === opt.value && <Check className="h-3.5 w-3.5 text-primary shrink-0" />}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
 
       {/* ── Bulk action bar (replaces header when selecting) ── */}
