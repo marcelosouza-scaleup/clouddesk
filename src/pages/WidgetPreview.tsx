@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { ChatBubbleButton } from "@/components/widget/ChatBubbleButton";
 import { ChatWidget } from "@/components/widget/ChatWidget";
+import { ChatWidgetNotice } from "@/components/widget/ChatWidgetNotice";
 import { useWidgetStore } from "@/components/widget/useWidgetStore";
+import { useWidgetLiveUpdates } from "@/components/widget/useWidgetLiveUpdates";
 import { DEFAULT_SETTINGS } from "@/components/widget/types";
 import { supabase } from "@/integrations/supabase/client";
 import { Input } from "@/components/ui/input";
@@ -18,7 +20,11 @@ const mockSettings = {
 };
 
 export default function WidgetPreview() {
-  const { setAccount, setConversation, setMessages } = useWidgetStore();
+  const { setAccount, setConversation, setMessages, setPendingOpenId, setOpen } = useWidgetStore();
+
+  // Mesma infra do embed: realtime + badge + aviso flutuante funcionando no
+  // preview, para dar para testar o fluxo de "operador respondeu" por aqui.
+  useWidgetLiveUpdates(true);
 
   const [emailInput, setEmailInput]   = useState(DEFAULT_EMAIL);
   const [activeEmail, setActiveEmail] = useState(DEFAULT_EMAIL);
@@ -35,9 +41,19 @@ export default function WidgetPreview() {
     setStatus("loading");
     setActiveEmail(trimmed);
 
-    // Reset widget state so new conversation starts fresh
+    // Reset widget state so new conversation starts fresh. A lista de chamados
+    // também zera: ela pertence ao cliente anterior e o bootstrap do widget
+    // recarrega a do novo email (conversationsLoaded volta a false).
     setConversation(null);
     setMessages([]);
+    useWidgetStore.setState({
+      conversations: [],
+      conversationsLoaded: false,
+      conversationsError: false,
+      unreadCount: 0,
+      notice: null,
+      view: "list",
+    });
 
     try {
       const { data, error } = await supabase.functions.invoke<ContactInfo>(
@@ -182,6 +198,12 @@ export default function WidgetPreview() {
 
       {/* Widget overlay */}
       <ChatWidget settings={mockSettings} />
+      <ChatWidgetNotice
+        onOpen={(id) => {
+          setPendingOpenId(id);
+          setOpen(true);
+        }}
+      />
       <ChatBubbleButton />
     </div>
   );

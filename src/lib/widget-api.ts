@@ -6,7 +6,11 @@
 import { supabase } from "@/integrations/supabase/client";
 import { FunctionsHttpError } from "@supabase/supabase-js";
 import type { ContactInfo } from "@/lib/contact-info";
-import type { WidgetConversation, WidgetMessage } from "@/components/widget/types";
+import type {
+  WidgetConversation,
+  WidgetConversationSummary,
+  WidgetMessage,
+} from "@/components/widget/types";
 
 // ── Identidade ────────────────────────────────────────────────────────────────
 
@@ -33,6 +37,21 @@ export interface BootstrapResult {
   conversation: WidgetConversation | null;
   messages: WidgetMessage[];
   contact: ContactInfo | null;
+  /** Todos os chamados do cliente — o widget abre nesta lista.
+   *  null quando a leitura falhou (ver conversations_failed). */
+  conversations: WidgetConversationSummary[] | null;
+  /** true = a lista NÃO pôde ser lida. Diferente de lista vazia: o widget
+   *  mostra erro com "tentar de novo" em vez de "nenhum chamado ainda". */
+  conversations_failed?: boolean;
+}
+
+export interface ConversationsResult {
+  conversations: WidgetConversationSummary[];
+}
+
+export interface MarkReadResult {
+  success: boolean;
+  read_at?: string;
 }
 
 export interface TurnResult {
@@ -129,13 +148,16 @@ export const widgetApi = {
     return call("bootstrap");
   },
 
-  /** Primeira mensagem — cria (ou retoma) a conversa e roda a IA. */
+  /** Primeira mensagem — cria (ou retoma) a conversa e roda a IA.
+   *  forceNew: cliente clicou em "Nova conversa" e quer um chamado separado,
+   *  em vez de continuar o que já está aberto. */
   start(
     message: string,
     source: "quick_reply" | "text" = "text",
     imageData?: string,
+    forceNew = false,
   ): Promise<TurnResult> {
-    return call("start", { message, source, image_data: imageData });
+    return call("start", { message, source, image_data: imageData, force_new: forceNew });
   },
 
   /** Mensagem em conversa existente. */
@@ -148,9 +170,19 @@ export const widgetApi = {
     return call("send", { conversation_id: conversationId, message, source, image_data: imageData });
   },
 
+  /** Lista de chamados do cliente (abertos + resolvidos), com prévia e não lidas. */
+  conversations(): Promise<ConversationsResult> {
+    return call("conversations");
+  },
+
   /** Recarrega o thread (usado ao voltar o foco para a aba). */
   messages(conversationId: string): Promise<MessagesResult> {
     return call("messages", { conversation_id: conversationId });
+  },
+
+  /** Marca a conversa como lida até agora (cliente abriu/está vendo a thread). */
+  markRead(conversationId: string): Promise<MarkReadResult> {
+    return call("mark_read", { conversation_id: conversationId });
   },
 
   /** Avaliação pós-atendimento. rating 1=😞 2=😐 3=😊 */

@@ -12,7 +12,8 @@
 //   • Validação de posse em TODA ação sobre uma conversa (user_email da conversa
 //     precisa bater com o e-mail verificado)
 //
-// Ações: hello | bootstrap | start | send | messages | csat | resend_credentials
+// Ações: hello | bootstrap | conversations | start | send | messages | mark_read |
+//        csat | resend_credentials
 
 import { newServiceClient, type ServiceClient } from '../_shared/supabase.ts';
 import { corsHeaders } from '../_shared/cors.ts';
@@ -31,9 +32,11 @@ import { broadcastToConversation } from '../_shared/broadcast.ts';
 type WidgetAction =
   | 'hello'
   | 'bootstrap'
+  | 'conversations'
   | 'start'
   | 'send'
   | 'messages'
+  | 'mark_read'
   | 'csat'
   | 'resend_credentials';
 
@@ -51,6 +54,10 @@ interface WidgetApiRequest {
   account_user_id?: string;
   /** Imagem anexada pelo cliente: data URL base64 (image/png|jpeg|webp|gif, ≤4MB) */
   image_data?: string;
+  /** 'start' com intenção explícita de abrir um chamado SEPARADO (botão "Nova
+   *  conversa"), em vez de reaproveitar o chamado aberto. Continua sujeito ao
+   *  rate limit 'newconv'. */
+  force_new?: boolean;
 }
 
 interface ConversationRow {
@@ -62,6 +69,22 @@ interface ConversationRow {
   ai_active: boolean;
   user_email: string | null;
   account_user_id: string | null;
+  last_message_at: string | null;
+  contact_last_read_at: string | null;
+}
+
+/** Linha da lista de chamados do cliente: conversa + prévia + não lidas. */
+interface ConversationSummary extends Record<string, unknown> {
+  id: string;
+  status: string;
+  created_at: string;
+  subject: string | null;
+  assigned_agent_id: string | null;
+  ai_active: boolean;
+  last_message_at: string | null;
+  last_message_preview: string | null;
+  last_message_sender: string | null;
+  unread_count: number;
 }
 
 interface MessageRow {
@@ -75,7 +98,7 @@ interface MessageRow {
   metadata: Record<string, unknown> | null;
 }
 
-const CONV_SELECT = 'id, status, created_at, subject, assigned_agent_id, ai_active, user_email, account_user_id';
+const CONV_SELECT = 'id, status, created_at, subject, assigned_agent_id, ai_active, user_email, account_user_id, last_message_at, contact_last_read_at';
 const MSG_SELECT = 'id, conversation_id, sender_type, content, created_at, ai_generated, is_private_note, metadata';
 
 const MAX_MESSAGE_CHARS = 4000;
@@ -207,7 +230,95 @@ function publicConversation(row: ConversationRow): Record<string, unknown> {
     subject: row.subject,
     assigned_agent_id: row.assigned_agent_id,
     ai_active: row.ai_active,
+    last_message_at: row.last_message_at,
+    contact_last_read_at: row.contact_last_read_at,
   };
+}
+
+// ─── Lista de chamados do cliente ─────────────────────────────────────────────
+// O cliente volta horas/dias depois para ver a resposta do operador. Esta ação
+// devolve TODOS os chamados dele (abertos e resolvidos), cada um com prévia da
+// última mensagem e contagem de não lidas — em duas queries, sem N+1.
+
+const CONV_LIST_LIMIT = 30;
+/** Só conta como "não lida" mensagem que veio da equipe — o eco da própria
+ *  mensagem do cliente nunca deve acender o badge. */
+const INBOUND_SENDERS = ['agent', 'bot', 'system'];
+
+/** Corta a prévia sem quebrar no meio de uma palavra gigante. */
+function previewOf(content: string): string {
+  const flat = content.replace(/\s+/g, ' ').trim();
+  return flat.length > 90 ? `${flat.slice(0, 90)}…` : flat;
+}
+
+/** Falha ao LER a lista de chamados. Existe para o widget conseguir distinguir
+ *  "você não tem chamados" de "não consegui carregar" — devolver [] nos dois
+ *  casos mostra um empty state mentiroso para um cliente que TEM chamados. */
+class ConversationListError extends Error {}
+
+async function listConversations(
+  service: ServiceClient,
+  email: string,
+): Promise<ConversationSummary[]> {
+  const emailPattern = email.replace(/([%_\\])/g, '\\$1');
+  const { data, error } = await service
+    .from('desk_conversations')
+    .select(CONV_SELECT)
+    .ilike('user_email', emailPattern)
+    .order('last_message_at', { ascending: false, nullsFirst: false })
+    .limit(CONV_LIST_LIMIT);
+
+  if (error) {
+    console.error('[widget-api] listConversations:', error.message);
+    throw new ConversationListError(error.message);
+  }
+
+  const rows = (data ?? []) as unknown as ConversationRow[];
+  if (rows.length === 0) return [];
+
+  // Uma query só para as mensagens visíveis de todas as conversas da página.
+  // Ordenada ASC para o último item de cada conversa ser a mensagem mais nova.
+  const ids = rows.map((r) => r.id);
+  const { data: msgData, error: msgErr } = await service
+    .from('desk_messages')
+    .select('conversation_id, sender_type, content, created_at')
+    .in('conversation_id', ids)
+    .eq('is_private_note', false)
+    .order('created_at', { ascending: true });
+
+  if (msgErr) console.warn('[widget-api] listConversations/messages:', msgErr.message);
+
+  const lastByConv = new Map<string, { sender_type: string; content: string }>();
+  const unreadByConv = new Map<string, number>();
+  const readAt = new Map(
+    rows.map((r) => [r.id, r.contact_last_read_at ? Date.parse(r.contact_last_read_at) : 0]),
+  );
+
+  for (const m of (msgData ?? []) as unknown as MessageRow[]) {
+    lastByConv.set(m.conversation_id, { sender_type: m.sender_type, content: m.content });
+
+    if (!INBOUND_SENDERS.includes(m.sender_type)) continue;
+    const seenUntil = readAt.get(m.conversation_id) ?? 0;
+    if (Date.parse(m.created_at) > seenUntil) {
+      unreadByConv.set(m.conversation_id, (unreadByConv.get(m.conversation_id) ?? 0) + 1);
+    }
+  }
+
+  return rows.map((row) => {
+    const last = lastByConv.get(row.id) ?? null;
+    return {
+      id: row.id,
+      status: row.status,
+      created_at: row.created_at,
+      subject: row.subject,
+      assigned_agent_id: row.assigned_agent_id,
+      ai_active: row.ai_active,
+      last_message_at: row.last_message_at,
+      last_message_preview: last ? previewOf(last.content) : null,
+      last_message_sender: last?.sender_type ?? null,
+      unread_count: unreadByConv.get(row.id) ?? 0,
+    };
+  });
 }
 
 async function createConversation(
@@ -239,6 +350,40 @@ async function createConversation(
     return null;
   }
   return created as unknown as ConversationRow;
+}
+
+/** Reabre um chamado resolvido na MESMA thread (cliente respondeu depois de
+ *  resolvido). Volta para a fila humana — não para a IA. */
+async function reopenConversation(
+  service: ServiceClient,
+  conversation: ConversationRow,
+): Promise<ConversationRow | null> {
+  const { data, error } = await service
+    .from('desk_conversations')
+    .update({ status: 'pending', ai_active: false, resolved_at: null })
+    .eq('id', conversation.id)
+    .select(CONV_SELECT)
+    .single();
+
+  if (error || !data) {
+    console.error('[widget-api] reabrir conversa falhou:', error?.message);
+    return null;
+  }
+
+  await insertMessage(
+    service,
+    conversation.id,
+    'system',
+    '🔄 Chamado reaberto pelo cliente.',
+  );
+
+  // A inbox do operador precisa saber na hora que este chamado voltou.
+  void broadcastToConversation(conversation.id, 'conv_updated', {
+    status: 'pending',
+    ai_active: false,
+  });
+
+  return data as unknown as ConversationRow;
 }
 
 // ─── Upload de imagem (P2) ─────────────────────────────────────────────────────
@@ -401,7 +546,7 @@ Deno.serve(async (req) => {
     const body: WidgetApiRequest = await req.json().catch(() => ({}));
     const action = body.action;
 
-    const validActions: WidgetAction[] = ['hello', 'bootstrap', 'start', 'send', 'messages', 'csat', 'resend_credentials'];
+    const validActions: WidgetAction[] = ['hello', 'bootstrap', 'conversations', 'start', 'send', 'messages', 'mark_read', 'csat', 'resend_credentials'];
     if (!action || !validActions.includes(action)) {
       return json({ error: 'Ação inválida' }, 400);
     }
@@ -418,6 +563,11 @@ Deno.serve(async (req) => {
     const RULES: Record<WidgetAction, RateRule[]> = {
       hello:              [{ name: 'hello', max: 60, windowSeconds: 300 }],
       bootstrap:          [{ name: 'boot', max: 30, windowSeconds: 300 }],
+      // Lista é releitura barata (o cliente navega entre lista e thread várias
+      // vezes por sessão) — teto folgado, só para conter abuso.
+      conversations:      [{ name: 'convlist', max: 90, windowSeconds: 300 }],
+      // mark_read dispara a cada abertura de thread e volta de foco.
+      mark_read:          [{ name: 'read', max: 120, windowSeconds: 300 }],
       start: [
         { name: 'newconv', max: 6, windowSeconds: 3600 },
         { name: 'msg', max: 10, windowSeconds: 60 },
@@ -454,15 +604,22 @@ Deno.serve(async (req) => {
 
     if (action === 'bootstrap') {
       const conversation = await findOpenConversation(service, email);
-      const [messages, contact] = await Promise.all([
+      // A lista vem junto: o widget abre direto na tela de chamados, então
+      // pedi-la numa segunda chamada só atrasaria a primeira renderização.
+      const [messages, contact, conversations] = await Promise.all([
         conversation ? listMessages(service, conversation.id) : Promise.resolve([] as MessageRow[]),
         fetchContactInfo(email).catch(() => null as ContactInfoResult | null),
+        // null (≠ []) sinaliza "não consegui ler a lista" — o widget mantém o
+        // que já tinha em vez de exibir "nenhum chamado ainda".
+        listConversations(service, email).catch(() => null),
       ]);
       return json({
         eligible: true,
         conversation: conversation ? publicConversation(conversation) : null,
         messages,
         contact,
+        conversations,
+        conversations_failed: conversations === null,
       });
     }
 
@@ -482,17 +639,26 @@ Deno.serve(async (req) => {
         conversation = await loadOwnedConversation(service, body.conversation_id, email);
         if (!conversation) return json({ error: 'Conversa não encontrada' }, 403);
 
-        // P9: se a conversa referenciada já foi RESOLVIDA, não reabre a antiga —
-        // abre um chamado NOVO e zerado (data nova, contexto limpo). Assim o
-        // cliente que volta dias depois não herda o histórico de outro assunto.
+        // Chamado resolvido que recebe resposta do cliente REABRE na mesma
+        // thread: o cliente está respondendo àquele atendimento (viu a resposta
+        // na lista de chamados e voltou), então o histórico tem que continuar
+        // junto — quebrar em um chamado novo faz o operador perder o contexto.
+        // Vai direto para humano (ai_active=false): se o assunto voltou depois
+        // de resolvido, a IA já teve sua chance.
         if (conversation.status === 'resolved') {
-          const fresh = await createConversation(service, email, subject);
-          if (!fresh) return json({ error: 'Não foi possível iniciar a conversa. Tente novamente.' }, 500);
-          conversation = fresh;
+          const reopened = await reopenConversation(service, conversation);
+          if (!reopened) return json({ error: 'Não foi possível reabrir o chamado. Tente novamente.' }, 500);
+          conversation = reopened;
         }
       } else {
-        // start: reutiliza conversa aberta (não-resolvida) existente ou cria nova
-        conversation = await findOpenConversation(service, email);
+        // start: por padrão reutiliza a conversa aberta — mensagens soltas do
+        // mesmo assunto não devem virar chamados duplicados na inbox.
+        //
+        // force_new=true vem do botão "Nova conversa" da lista de chamados: aí
+        // o cliente PEDIU explicitamente um chamado separado (assunto novo),
+        // então reaproveitar o antigo seria ignorar o que ele escolheu.
+        const forceNew = body.force_new === true;
+        conversation = forceNew ? null : await findOpenConversation(service, email);
         if (!conversation) {
           conversation = await createConversation(service, email, subject);
           if (!conversation) return json({ error: 'Não foi possível iniciar a conversa. Tente novamente.' }, 500);
@@ -506,12 +672,46 @@ Deno.serve(async (req) => {
       return json(result);
     }
 
+    if (action === 'conversations') {
+      // Lista de chamados do cliente (abertos + resolvidos), com prévia e
+      // contagem de não lidas — é a tela inicial do widget.
+      try {
+        const conversations = await listConversations(service, email);
+        return json({ conversations });
+      } catch (e) {
+        // 500 explícito: o widget mostra "não consegui carregar" com retry, em
+        // vez do empty state "nenhum chamado ainda" (que seria mentira).
+        console.error('[widget-api] conversations falhou:', e instanceof Error ? e.message : e);
+        return json({ error: 'Não foi possível carregar seus chamados.' }, 500);
+      }
+    }
+
     if (action === 'messages') {
       if (!body.conversation_id) return json({ error: 'conversation_id obrigatório' }, 400);
       const conversation = await loadOwnedConversation(service, body.conversation_id, email);
       if (!conversation) return json({ error: 'Conversa não encontrada' }, 403);
       const messages = await listMessages(service, conversation.id);
       return json({ conversation: publicConversation(conversation), messages });
+    }
+
+    if (action === 'mark_read') {
+      // Cliente abriu a thread → tudo que já chegou conta como lido.
+      // O horário vem do servidor: relógio do cliente adiantado marcaria como
+      // lidas mensagens que ainda nem chegaram.
+      if (!body.conversation_id) return json({ error: 'conversation_id obrigatório' }, 400);
+      const conversation = await loadOwnedConversation(service, body.conversation_id, email);
+      if (!conversation) return json({ error: 'Conversa não encontrada' }, 403);
+
+      const readAt = new Date().toISOString();
+      const { error: readErr } = await service
+        .from('desk_conversations')
+        .update({ contact_last_read_at: readAt })
+        .eq('id', conversation.id);
+      if (readErr) {
+        console.warn('[widget-api] mark_read falhou:', readErr.message);
+        return json({ success: false }, 500);
+      }
+      return json({ success: true, read_at: readAt });
     }
 
     if (action === 'csat') {
