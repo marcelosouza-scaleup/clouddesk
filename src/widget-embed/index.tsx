@@ -2,7 +2,9 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { ChatWidget, type EmbedUser } from "@/components/widget/ChatWidget";
 import { ChatBubbleButton } from "@/components/widget/ChatBubbleButton";
+import { ChatWidgetNotice } from "@/components/widget/ChatWidgetNotice";
 import { useWidgetStore } from "@/components/widget/useWidgetStore";
+import { useWidgetLiveUpdates } from "@/components/widget/useWidgetLiveUpdates";
 import { DEFAULT_SETTINGS } from "@/components/widget/types";
 import { configureWidgetApi, widgetApi } from "@/lib/widget-api";
 // CSS do widget como STRING (?inline): o Vite não emite/injeta CSS no build de
@@ -36,10 +38,44 @@ declare global {
 
 function EmbedRoot({ embedUser }: { embedUser: EmbedUser }) {
   const isOpen = useWidgetStore((s) => s.isOpen);
+  const conversationsLoaded = useWidgetStore((s) => s.conversationsLoaded);
+  const setConversations = useWidgetStore((s) => s.setConversations);
+  const setPendingOpenId = useWidgetStore((s) => s.setPendingOpenId);
+  const setOpen = useWidgetStore((s) => s.setOpen);
+
+  // Carrega a lista de chamados MESMO COM O WIDGET FECHADO: é ela que alimenta
+  // o badge de não lidas na bolha e diz ao realtime quais conversas assinar.
+  // Sem isto, o cliente só descobriria a resposta do operador ao abrir o widget
+  // por conta própria — exatamente o problema que esta tela resolve.
+  React.useEffect(() => {
+    if (conversationsLoaded) return;
+    let cancelled = false;
+    widgetApi
+      .conversations()
+      .then(({ conversations }) => {
+        if (!cancelled) setConversations(conversations);
+      })
+      .catch((err) => {
+        console.warn("[CloudDesk] falha ao carregar chamados:", err);
+        // Erro ≠ lista vazia: sem isto o widget abriria dizendo "nenhum chamado
+        // ainda" para um cliente que tem chamados em aberto.
+        if (!cancelled) useWidgetStore.getState().setConversationsError(true);
+      });
+    return () => { cancelled = true; };
+  }, [conversationsLoaded, setConversations]);
+
+  useWidgetLiveUpdates(true);
+
+  // Clique no aviso flutuante: abre o widget já no chamado que respondeu.
+  const handleNoticeOpen = (conversationId: string) => {
+    setPendingOpenId(conversationId);
+    setOpen(true);
+  };
 
   return (
     <>
       <ChatBubbleButton />
+      <ChatWidgetNotice onOpen={handleNoticeOpen} />
       {isOpen && (
         <ChatWidget settings={DEFAULT_SETTINGS} embedUser={embedUser} />
       )}

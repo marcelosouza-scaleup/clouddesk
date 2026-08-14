@@ -1,22 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { supabase } from "@/integrations/supabase/client";
 import { useWidgetStore } from "./useWidgetStore";
 import { ChatWidgetHeader } from "./ChatWidgetHeader";
 import { ChatWidgetWelcome } from "./ChatWidgetWelcome";
 import { ChatWidgetThread } from "./ChatWidgetThread";
 import { ChatWidgetComposer } from "./ChatWidgetComposer";
+import { ChatWidgetConversationList } from "./ChatWidgetConversationList";
 import { CSATFeedback } from "./CSATFeedback";
 import { configureWidgetApi, widgetApi, WidgetApiError, type TurnResult } from "@/lib/widget-api";
 import type { CloudDeskSettings, WidgetMessage } from "./types";
 import type { ContactInfo } from "@/lib/contact-info";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SEGURANÇA: este componente NÃO acessa nenhuma tabela desk_* diretamente.
-// Toda leitura/escrita passa pela Edge Function desk-widget-api, que verifica a
-// identidade do cliente (user_hash HMAC vindo do backend do site host, ou sessão
-// de operador no preview). O único uso do client Supabase aqui é o canal de
-// broadcast Realtime `conv-live:{id}` — capability: só quem conhece o UUID da
-// conversa (o dono e os operadores) escuta.
+// SEGURANÇA: este componente NÃO acessa nenhuma tabela desk_* diretamente nem
+// abre canal Realtime. Toda leitura/escrita passa pela Edge Function
+// desk-widget-api, que verifica a identidade do cliente (user_hash HMAC vindo do
+// backend do site host, ou sessão de operador no preview). O Realtime é
+// responsabilidade exclusiva de useWidgetLiveUpdates — canal de broadcast
+// `conv-live:{id}`, capability: só quem conhece o UUID da conversa escuta.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── Welcome message builder (efêmera — não persiste até o cliente falar) ──────
@@ -144,20 +144,29 @@ interface Props {
 export function ChatWidget({ settings, embedUser }: Props) {
   const {
     isOpen,
+    view,
     account,
     conversation,
+    conversations,
+    conversationsLoaded,
+    conversationsError,
     messages,
     showCsat,
     isAiResponding,
     isWaitingForHuman,
     agentConnected,
+    setView,
     setConversation,
+    setConversations,
+    setConversationsError,
     addMessage,
     setMessages,
     setInfras,
     setIsAiResponding,
     setIsWaitingForHuman,
     setAgentConnected,
+    markConversationRead,
+    backToList,
   } = useWidgetStore();
 
   // Identidade efetiva: embed real (com hash) ou conta simulada do preview
@@ -181,10 +190,23 @@ export function ChatWidget({ settings, embedUser }: Props) {
 
   const bootstrapInFlight = useRef(false);
 
+  // O cliente clicou em "Nova conversa": a próxima mensagem tem que abrir um
+  // chamado SEPARADO, mesmo que exista um aberto. Vive num ref porque é uma
+  // intenção momentânea — some assim que a conversa nasce.
+  const forceNewConversation = useRef(false);
+
   // Aplica o resultado de um turno (start/send) ao estado do widget.
   // Remove a mensagem otimista temporária (optimisticId) ao mesclar as reais.
   const applyTurn = useCallback((result: TurnResult, optimisticId?: string) => {
-    if (result.conversation) setConversation(result.conversation);
+    if (result.conversation) {
+      setConversation(result.conversation);
+      // A lista precisa conhecer o chamado recém-criado/reaberto — senão ele
+      // não aparece ao voltar, e o realtime não assina o canal dele.
+      void widgetApi
+        .conversations()
+        .then(({ conversations }) => useWidgetStore.getState().setConversations(conversations))
+        .catch(() => {});
+    }
 
     const store = useWidgetStore.getState();
     const base = optimisticId
@@ -247,7 +269,8 @@ export function ChatWidget({ settings, embedUser }: Props) {
       try {
         const result = conv
           ? await widgetApi.send(conv.id, trimmed, source, imageData)
-          : await widgetApi.start(trimmed, source, imageData);
+          : await widgetApi.start(trimmed, source, imageData, forceNewConversation.current);
+        forceNewConversation.current = false; // intenção consumida
         applyTurn(result, optimistic.id);
       } catch (err) {
         // Mantém a mensagem otimista (o cliente vê o que enviou) e mostra o erro
@@ -295,131 +318,136 @@ export function ChatWidget({ settings, embedUser }: Props) {
     [conversation, addMessage]
   );
 
-  // ── Bootstrap: retoma conversa aberta OU mostra welcome efêmera ──────────────
-  // Roda quando o widget abre sem conversa carregada. A conversa só é CRIADA
-  // quando o cliente envia a primeira mensagem (nada de conversas vazias na inbox).
+  // ── Bootstrap: carrega a LISTA de chamados do cliente ────────────────────────
+  // A tela inicial é a lista (o cliente volta horas/dias depois para ver a
+  // resposta), então o bootstrap não entra mais direto numa thread. As conversas
+  // continuam sendo CRIADAS só quando o cliente envia a primeira mensagem —
+  // nada de chamados vazios na inbox do operador.
   useEffect(() => {
-    if (!isOpen) return;
-    if (conversation) return;
     if (!identityEmail) return;
     if (bootstrapInFlight.current) return;
-
-    const store = useWidgetStore.getState();
-    if (store.messages.length > 0) return; // welcome já exibida nesta sessão
+    if (conversationsLoaded) return;
 
     bootstrapInFlight.current = true;
 
     (async () => {
       try {
         const boot = await widgetApi.bootstrap();
-
         if (boot.contact?.infras) setInfras(boot.contact.infras);
-
-        if (boot.conversation) {
-          setConversation(boot.conversation);
-          setMessages(boot.messages ?? []);
-          if (boot.conversation.status === "pending") {
-            if (boot.conversation.assigned_agent_id) setAgentConnected(true);
-            else setIsWaitingForHuman(true);
-          }
-          return;
-        }
-
-        // Sem conversa aberta → saudação personalizada local (efêmera)
-        const welcomeText = boot.contact ? buildWelcomeMessage(boot.contact) : null;
-        if (welcomeText) {
-          setMessages([{ ...localMessage("bot", welcomeText), id: "local-welcome" }]);
+        // conversations null / conversations_failed = a leitura quebrou. Marcar
+        // como erro (e não como lista vazia) evita dizer "nenhum chamado ainda"
+        // para um cliente que tem chamados abertos.
+        if (boot.conversations_failed || boot.conversations === null) {
+          setConversationsError(true);
+        } else {
+          setConversations(boot.conversations);
         }
       } catch (err) {
         console.error("[Widget] Bootstrap falhou:", err);
+        setConversationsError(true);
       } finally {
         bootstrapInFlight.current = false;
       }
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, conversation?.id, identityEmail]);
+  }, [identityEmail, conversationsLoaded]);
 
-  // ── Realtime: canal de broadcast único conv-live:{id} ────────────────────────
-  // Mantido vivo enquanto há conversa (mesmo minimizado). Eventos:
-  //   new_message  → mensagens do operador (o painel publica após INSERT)
-  //   conv_updated → mudanças de status/atribuição (painel e servidor publicam)
-  useEffect(() => {
-    const convId = conversation?.id;
-    if (!convId) return;
+  /** Recarrega a lista de chamados (botão "Tentar de novo"). */
+  const reloadConversations = useCallback(async () => {
+    try {
+      const { conversations: list } = await widgetApi.conversations();
+      setConversations(list);
+    } catch (err) {
+      console.error("[Widget] Falha ao recarregar chamados:", err);
+      setConversationsError(true);
+    }
+  }, [setConversations, setConversationsError]);
 
-    const addToStore = (raw: Record<string, unknown>) => {
-      try {
-        if (!raw.id || !raw.created_at) return;
-        if (raw.is_private_note === true) return;
-
-        const newMsg: WidgetMessage = {
-          id:              String(raw.id),
-          conversation_id: String(raw.conversation_id ?? convId),
-          sender_type:     (raw.sender_type ?? "system") as WidgetMessage["sender_type"],
-          content:         String(raw.content ?? ""),
-          created_at:      String(raw.created_at),
-          ai_generated:    raw.ai_generated === true,
-          is_private_note: false,
-          metadata:        (raw.metadata ?? null) as WidgetMessage["metadata"],
-        };
-
-        const store = useWidgetStore.getState();
-        const current = Array.isArray(store.messages) ? store.messages : [];
-        if (current.some((m) => m.id === newMsg.id)) return;
-
-        store.setMessages(mergeMessages(current, [newMsg]));
-
-        // Destrava o composer assim que um operador humano responde.
-        if (newMsg.sender_type === "agent" && store.isWaitingForHuman) {
-          store.setIsWaitingForHuman(false);
-          store.setAgentConnected(true);
-        }
-      } catch (err) {
-        console.error("[Widget] addToStore error:", err);
-      }
-    };
-
-    const handleConvUpdated = (payload: Record<string, unknown>) => {
+  // ── Abrir um chamado da lista ────────────────────────────────────────────────
+  const openConversation = useCallback(
+    async (conversationId: string) => {
       const store = useWidgetStore.getState();
-      const status = typeof payload.status === "string" ? payload.status : null;
-      const assigned = payload.assigned_agent_id;
+      const summary = store.conversations.find((c) => c.id === conversationId) ?? null;
 
-      if (status) {
-        const conv = store.conversation;
-        if (conv) store.setConversation({ ...conv, status });
+      // Entra na thread já com o que se sabe da lista — o cliente vê a tela
+      // trocar na hora, sem esperar a rede.
+      setView("thread");
+      setMessages([]);
+      if (summary) {
+        setConversation({
+          id: summary.id,
+          status: summary.status,
+          created_at: summary.created_at,
+          subject: summary.subject,
+          assigned_agent_id: summary.assigned_agent_id,
+          ai_active: summary.ai_active,
+          last_message_at: summary.last_message_at,
+        });
+      }
 
-        if (status === "resolved") {
-          store.setIsWaitingForHuman(false);
-          if (!store.csatSubmitted) store.setShowCsat(true);
-        } else if (status === "pending") {
-          if (!store.agentConnected) store.setIsWaitingForHuman(true);
-        } else if (status === "open") {
-          store.setShowCsat(false);
+      try {
+        const result = await widgetApi.messages(conversationId);
+        setConversation(result.conversation);
+        setMessages(result.messages ?? []);
+
+        const status = result.conversation.status;
+        if (status === "pending") {
+          if (result.conversation.assigned_agent_id) setAgentConnected(true);
+          else setIsWaitingForHuman(true);
         }
+
+        // Abriu = leu. Falha aqui só significa que o badge some no próximo
+        // refresh — não vale interromper a leitura com um erro.
+        markConversationRead(conversationId);
+        void widgetApi.markRead(conversationId).catch(() => {});
+      } catch (err) {
+        console.error("[Widget] Falha ao abrir chamado:", err);
+        addMessage(
+          localMessage("system", "Não consegui carregar este chamado agora. Tente novamente."),
+        );
       }
+    },
+    [setView, setMessages, setConversation, setAgentConnected, setIsWaitingForHuman, markConversationRead, addMessage],
+  );
 
-      if (assigned !== null && assigned !== undefined && assigned !== "") {
-        store.setAgentConnected(true);
-        store.setIsWaitingForHuman(false);
+  // Chamado pedido de fora (clique no aviso flutuante com o widget fechado):
+  // o EmbedRoot só consegue setar o id, quem sabe carregar a thread é este
+  // componente — então ele consome o pedido assim que monta.
+  const pendingOpenId = useWidgetStore((s) => s.pendingOpenId);
+  useEffect(() => {
+    if (!pendingOpenId) return;
+    useWidgetStore.getState().setPendingOpenId(null);
+    void openConversation(pendingOpenId);
+  }, [pendingOpenId, openConversation]);
+
+  // ── Nova conversa: tela de boas-vindas com saudação personalizada ────────────
+  // A conversa NÃO é criada aqui — só quando o cliente enviar a primeira
+  // mensagem (mesma regra de sempre: nada de chamados vazios na inbox).
+  const startNewConversation = useCallback(async () => {
+    backToList();          // limpa thread/CSAT/estado do chamado anterior
+    forceNewConversation.current = true;
+    setView("thread");
+
+    try {
+      const contact = await widgetApi.bootstrap().then((b) => b.contact);
+      if (contact?.infras) setInfras(contact.infras);
+      const welcomeText = contact ? buildWelcomeMessage(contact) : null;
+      // Só escreve a saudação se o cliente ainda não digitou nada — ele pode
+      // ter enviado a primeira mensagem antes desta resposta chegar.
+      if (welcomeText && useWidgetStore.getState().messages.length === 0) {
+        setMessages([{ ...localMessage("bot", welcomeText), id: "local-welcome" }]);
       }
-    };
+    } catch (err) {
+      console.error("[Widget] Falha ao preparar nova conversa:", err);
+    }
+  }, [backToList, setView, setInfras, setMessages]);
 
-    const channel = supabase
-      .channel(`conv-live:${convId}`)
-      .on("broadcast", { event: "new_message" }, ({ payload }) => {
-        if (payload?.id) addToStore(payload as Record<string, unknown>);
-      })
-      .on("broadcast", { event: "conv_updated" }, ({ payload }) => {
-        if (payload) handleConvUpdated(payload as Record<string, unknown>);
-      })
-      .subscribe((status) => {
-        console.log(`[Widget] broadcast conv-live:${convId} → ${status}`);
-      });
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [conversation?.id]);
+  // ── Realtime ────────────────────────────────────────────────────────────────
+  // O canal `conv-live:{id}` é assinado UMA vez só, em useWidgetLiveUpdates
+  // (montado sempre, inclusive com o widget fechado). Este componente NÃO abre
+  // canal próprio: dois supabase.channel() com o mesmo tópico colidem — o
+  // segundo subscribe entra em erro e os eventos param de chegar de forma
+  // confiável. O hook injeta a mensagem na thread aberta e cuida do resto.
 
   // ── Re-sync ao voltar o foco para a aba (recupera eventos perdidos) ──────────
   useEffect(() => {
@@ -453,14 +481,28 @@ export function ChatWidget({ settings, embedUser }: Props) {
 
   if (!isOpen) return null;
 
+  const inThread = view === "thread";
+
   return (
     <div className="fixed bottom-24 right-6 z-[9998] w-[380px] max-w-[calc(100vw-2rem)] h-[550px] max-h-[calc(100vh-8rem)] rounded-xl shadow-2xl border border-border bg-card flex flex-col overflow-hidden animate-in slide-in-from-bottom-4 fade-in-0 duration-300 sm:w-[380px]">
       <ChatWidgetHeader
         widgetName={settings.widget_name}
         onlineAgents={2}
+        showBack={inThread}
+        onBack={backToList}
+        title={inThread ? conversation?.subject ?? "Nova conversa" : "Meus chamados"}
       />
 
-      {!conversation && messages.length === 0 ? (
+      {!inThread ? (
+        <ChatWidgetConversationList
+          conversations={conversations}
+          loading={!conversationsLoaded}
+          error={conversationsError}
+          onRetry={reloadConversations}
+          onOpenConversation={openConversation}
+          onNewConversation={startNewConversation}
+        />
+      ) : !conversation && messages.length === 0 ? (
         <>
           <ChatWidgetWelcome
             greeting={settings.greeting}
@@ -503,6 +545,17 @@ export function ChatWidget({ settings, embedUser }: Props) {
                 <div className="px-4 pb-2">
                   <p className="text-[11px] text-emerald-500 flex items-center gap-1.5">
                     ✅ Atendente conectado
+                  </p>
+                </div>
+              )}
+
+              {/* Chamado resolvido: o composer segue aberto de propósito —
+                  responder aqui reabre o chamado. Sem este aviso o cliente não
+                  saberia que ainda pode retomar o assunto. */}
+              {conversation?.status === "resolved" && (
+                <div className="px-4 pb-2">
+                  <p className="text-[11px] text-muted-foreground flex items-center gap-1.5">
+                    ✓ Chamado resolvido — responda aqui para reabrir
                   </p>
                 </div>
               )}

@@ -16,6 +16,23 @@ export interface WidgetConversation {
   subject: string | null;
   assigned_agent_id?: string | null;
   ai_active?: boolean;
+  last_message_at?: string | null;
+  /** Até quando o cliente já leu esta conversa (marcado server-side). */
+  contact_last_read_at?: string | null;
+}
+
+/** Linha da lista de chamados do cliente — conversa + prévia + não lidas. */
+export interface WidgetConversationSummary {
+  id: string;
+  status: string;
+  created_at: string;
+  subject: string | null;
+  assigned_agent_id: string | null;
+  ai_active: boolean;
+  last_message_at: string | null;
+  last_message_preview: string | null;
+  last_message_sender: "contact" | "agent" | "bot" | "system" | null;
+  unread_count: number;
 }
 
 // Type alias (não interface) para ser atribuível a Json — ver WidgetMessageMetadata.
