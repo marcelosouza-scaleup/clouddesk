@@ -158,6 +158,68 @@ Deno.test('status: termos internos viram rótulos pt-BR', () => {
   }
 });
 
+// ── Convite às comunidades ────────────────────────────────────────────────────
+
+type InviteCtx = Parameters<typeof _test.communityInviteFor>[0];
+
+function inviteCtx(over: Partial<InviteCtx> = {}): InviteCtx {
+  return {
+    history: [],
+    analysis: { intent: 'duvida_geral', sentiment: 'neutro', urgency: 'baixa', resolved: false },
+    autoResolved: false,
+    shouldHandoff: false,
+    isDraft: false,
+    isFirstMessage: false,
+    hasQuickReplies: false,
+    hasCredentialActions: false,
+    ...over,
+  };
+}
+
+Deno.test('convite: primeira resposta do chamado sempre convida', () => {
+  const out = _test.communityInviteFor(inviteCtx({ isFirstMessage: true }));
+  assertEquals(out, _test.COMMUNITY_INVITE_FIRST());
+  // Os 3 links (2 grupos de WhatsApp + Discord) precisam sair no convite.
+  assertEquals((out ?? '').match(/https:\/\/chat\.whatsapp\.com\//g)?.length, 2);
+  assertStringIncludes(out ?? '', 'uDftSRtfKe');
+});
+
+Deno.test('convite: primeira resposta convida mesmo em assunto sensível/irritado', () => {
+  // A janela 1 é incondicional de propósito — só handoff e rascunho a barram.
+  const out = _test.communityInviteFor(inviteCtx({
+    isFirstMessage: true,
+    analysis: { intent: 'billing', sentiment: 'irritado', urgency: 'alta', resolved: false },
+  }));
+  assertEquals(out, _test.COMMUNITY_INVITE_FIRST());
+});
+
+Deno.test('convite: nunca em handoff nem em rascunho do operador', () => {
+  assertEquals(_test.communityInviteFor(inviteCtx({ isFirstMessage: true, shouldHandoff: true })), null);
+  assertEquals(_test.communityInviteFor(inviteCtx({ isFirstMessage: true, isDraft: true })), null);
+});
+
+Deno.test('convite: não repete no mesmo chamado', () => {
+  const history = [{ sender_type: 'bot', content: _test.COMMUNITY_INVITE_FIRST() }];
+  assertEquals(_test.communityInviteFor(inviteCtx({ history, autoResolved: true })), null);
+});
+
+Deno.test('convite: janela de encerramento continua valendo para chamado já em andamento', () => {
+  const history = [{ sender_type: 'contact', content: 'oi' }, { sender_type: 'bot', content: 'olá' }];
+  assertEquals(
+    _test.communityInviteFor(inviteCtx({ history, autoResolved: true })),
+    _test.COMMUNITY_INVITE(),
+  );
+  // …mas não com cliente irritado ou tema sensível.
+  assertEquals(
+    _test.communityInviteFor(inviteCtx({
+      history,
+      autoResolved: true,
+      analysis: { intent: 'billing', sentiment: 'irritado', urgency: 'alta', resolved: true },
+    })),
+    null,
+  );
+});
+
 // ── E-mail ────────────────────────────────────────────────────────────────────
 
 Deno.test('email: normalização e validação', () => {

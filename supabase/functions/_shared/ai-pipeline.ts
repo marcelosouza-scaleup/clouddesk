@@ -136,6 +136,9 @@ export const _test = {
   CANCEL_RE: () => CANCEL_RE,
   CANCEL_FAIL_RE: () => CANCEL_FAIL_RE,
   friendlyDeployStatus: (v: string | null) => friendlyDeployStatus(v),
+  communityInviteFor: (ctx: InviteContext) => communityInviteFor(ctx),
+  COMMUNITY_INVITE_FIRST: () => COMMUNITY_INVITE_FIRST,
+  COMMUNITY_INVITE: () => COMMUNITY_INVITE,
 };
 
 export function sanitizeContactText(text: string): string {
@@ -208,16 +211,35 @@ async function applyPlanTag(
 const HELP_CENTER_URL = (Deno.env.get('HELP_CENTER_URL') ?? 'https://clouddesk.apps.cloudfy.cloud').replace(/\/+$/, '');
 
 // ─── Comunidade ───────────────────────────────────────────────────────────────
-// Grupos abertos a todos os clientes. Convite feito no encerramento e em
-// dúvidas gerais — nunca em ticket de problema, cobrança ou cliente irritado
-// (ver shouldInviteToCommunity).
-const COMMUNITY_WHATSAPP = Deno.env.get('COMMUNITY_WHATSAPP_URL') ?? 'https://chat.whatsapp.com/Hwuzqn4tXhxLSkpnivihIE';
-const COMMUNITY_DISCORD  = Deno.env.get('COMMUNITY_DISCORD_URL')  ?? 'https://discord.gg/uDftSRtfKe';
+// Grupos abertos a todos os clientes. O convite sai em duas janelas (ver
+// communityInviteFor):
+//   1. PRIMEIRA resposta da IA no chamado — janela principal, pega todo cliente
+//      que abre conversa, junto da saudação com os dados da infra dele;
+//   2. encerramento / dúvida geral resolvida — rede de segurança para quem já
+//      estava em conversa antes de o convite existir.
+// Sempre anexado server-side: o modelo nunca escreve estas URLs (alucinaria
+// código de convite) e nunca decide a hora.
+//
+// URLs em texto puro de propósito: o mesmo texto vai para o widget (que
+// transforma URL crua em link) e para o canal de e-mail (texto plano — markdown
+// apareceria literal na caixa do cliente).
+const COMMUNITY_WHATSAPP_1 = Deno.env.get('COMMUNITY_WHATSAPP_URL_1') ?? 'https://chat.whatsapp.com/JOee5dBfOATATPyZZeHoet';
+const COMMUNITY_WHATSAPP_2 = Deno.env.get('COMMUNITY_WHATSAPP_URL_2') ?? 'https://chat.whatsapp.com/Hwuzqn4tXhxLSkpnivihIE';
+export const COMMUNITY_DISCORD = Deno.env.get('COMMUNITY_DISCORD_URL') ?? 'https://discord.com/invite/uDftSRtfKe';
 
-const COMMUNITY_INVITE = `Ah, e se quiser trocar ideia com outros usuários da Cloudfy, temos duas comunidades abertas:
+const COMMUNITY_LINKS = `💬 WhatsApp #1: ${COMMUNITY_WHATSAPP_1}
+💬 WhatsApp #2: ${COMMUNITY_WHATSAPP_2}
+🎮 Discord: ${COMMUNITY_DISCORD}`;
 
-💬 WhatsApp: ${COMMUNITY_WHATSAPP}
-🎮 Discord: ${COMMUNITY_DISCORD}
+/** Janela 1 — vai junto da saudação inicial ("sua infra é X..."). */
+const COMMUNITY_INVITE_FIRST = `Já deixamos o convite para que você possa participar da nossa comunidade:
+
+${COMMUNITY_LINKS}`;
+
+/** Janela 2 — encerramento / dúvida geral resolvida. */
+const COMMUNITY_INVITE = `Ah, e se quiser trocar ideia com outros usuários da Cloudfy, nossas comunidades estão abertas:
+
+${COMMUNITY_LINKS}
 
 É lá que rolam dicas de automação, novidades e ajuda entre a galera.`;
 
@@ -783,7 +805,7 @@ function buildSystemPrompt(
     ? `
 [PLANO STARTER — SEM TRANSFERÊNCIA]
 Este cliente tem apenas plano(s) Starter ativo(s). NUNCA transfira para humano — mesmo que ele peça explicitamente. NÃO use ${TRANSFER_KEYWORD} em nenhuma hipótese.
-Tente resolver tudo você mesma. Se não conseguir resolver, oriente o cliente a usar a Central de ajuda (${HELP_CENTER_URL}/ajuda) e o Discord (https://discord.gg/uDftSRtfKe).
+Tente resolver tudo você mesma. Se não conseguir resolver, oriente o cliente a usar a Central de ajuda (${HELP_CENTER_URL}/ajuda) e o Discord (${COMMUNITY_DISCORD}).
 `
     : '';
 
@@ -829,7 +851,7 @@ Perguntas sobre cobrança (valor do plano, fatura, 2ª via, vencimento, se o pag
 Quando transferir, retorne APENAS ${TRANSFER_KEYWORD} — nada antes ou depois, sem explicação.
 Dúvida genérica, pergunta fora de contexto, ou algo que você consegue responder NÃO são motivos para transferir.
 
-Se o cliente tem APENAS plano(s) Starter ativo(s) (nenhuma assinatura ativa de Advanced, Ultra, Max ou outro), NUNCA transfira para humano — mesmo que peça. Tente resolver tudo. Se não conseguir, oriente para a Central de ajuda (${HELP_CENTER_URL}/ajuda) e o Discord (https://discord.gg/uDftSRtfKe). Se o cliente tiver alguma assinatura ativa não-Starter, o atendimento humano é normal.
+Se o cliente tem APENAS plano(s) Starter ativo(s) (nenhuma assinatura ativa de Advanced, Ultra, Max ou outro), NUNCA transfira para humano — mesmo que peça. Tente resolver tudo. Se não conseguir, oriente para a Central de ajuda (${HELP_CENTER_URL}/ajuda) e o Discord (${COMMUNITY_DISCORD}). Se o cliente tiver alguma assinatura ativa não-Starter, o atendimento humano é normal.
 
 ---
 
@@ -891,13 +913,16 @@ function clientConfirmedClosure(message: string): boolean {
 
 // ─── Convite para as comunidades ──────────────────────────────────────────────
 // Anexado server-side (não é decisão do modelo, que tenderia a repetir ou a
-// convidar na hora errada). Duas janelas: encerramento da conversa e dúvidas
-// gerais já resolvidas.
+// convidar na hora errada).
 
-/** Já convidamos nesta conversa? Evita repetir no mesmo atendimento. */
+/** Já convidamos nesta conversa? Evita repetir no mesmo atendimento. Checa as
+ *  três URLs; convites antigos (um grupo só) continuam sendo reconhecidos pelo
+ *  link do WhatsApp #2, que era o do texto anterior. */
+const COMMUNITY_URLS = [COMMUNITY_WHATSAPP_1, COMMUNITY_WHATSAPP_2, COMMUNITY_DISCORD];
+
 function alreadyInvited(history: MessageRow[]): boolean {
   return history.some(
-    (m) => m.sender_type === 'bot' && m.content.includes(COMMUNITY_WHATSAPP),
+    (m) => m.sender_type === 'bot' && COMMUNITY_URLS.some((url) => m.content.includes(url)),
   );
 }
 
@@ -907,42 +932,55 @@ interface InviteContext {
   autoResolved: boolean;
   shouldHandoff: boolean;
   isDraft: boolean;
+  isFirstMessage: boolean;
   hasQuickReplies: boolean;
   hasCredentialActions: boolean;
 }
 
 /**
- * Convida quando o atendimento terminou bem, sem atrapalhar quem está com
- * problema. NUNCA convida em: handoff, cliente irritado/negativo, urgência
- * alta ou crítica, temas sensíveis (cobrança, cancelamento, infra fora do ar)
- * ou quando ainda há ação pendente do cliente.
+ * Texto do convite a anexar nesta resposta, ou null para não convidar.
+ *
+ * Janela 1 (principal): a PRIMEIRA resposta da IA no chamado, junto da saudação
+ * proativa. Todo cliente que abre conversa recebe o convite uma vez.
+ *
+ * Janela 2 (legado): encerramento ou dúvida geral resolvida — só alcança quem
+ * não passou pela janela 1, e continua evitando cliente irritado, urgência alta
+ * e temas sensíveis.
+ *
+ * Nunca convida em rascunho do operador (quem escreve é humano) nem em handoff
+ * (ali quem fala é a mensagem de encaminhamento).
  */
-function shouldInviteToCommunity(ctx: InviteContext): boolean {
-  const { history, analysis, autoResolved, shouldHandoff, isDraft } = ctx;
+function communityInviteFor(ctx: InviteContext): string | null {
+  const { history, analysis, autoResolved, shouldHandoff, isDraft, isFirstMessage } = ctx;
 
-  // Rascunho do operador nunca leva convite — quem escreve é humano.
-  if (isDraft || shouldHandoff || !analysis) return false;
+  if (isDraft || shouldHandoff) return null;
+  if (alreadyInvited(history)) return null;
+
+  // Janela 1 — primeira resposta da conversa, independente do assunto.
+  if (isFirstMessage) return COMMUNITY_INVITE_FIRST;
+
+  if (!analysis) return null;
 
   // Ação pendente do cliente (botão de credenciais, pergunta com opções):
   // a conversa não terminou de fato.
-  if (ctx.hasQuickReplies || ctx.hasCredentialActions) return false;
-
-  if (alreadyInvited(history)) return false;
+  if (ctx.hasQuickReplies || ctx.hasCredentialActions) return null;
 
   // Cliente insatisfeito ou com urgência: convite soa desatento.
-  if (analysis.sentiment === 'negativo' || analysis.sentiment === 'irritado') return false;
-  if (analysis.urgency === 'alta' || analysis.urgency === 'critica') return false;
+  if (analysis.sentiment === 'negativo' || analysis.sentiment === 'irritado') return null;
+  if (analysis.urgency === 'alta' || analysis.urgency === 'critica') return null;
 
   // Temas sensíveis — mesmo resolvidos, não é hora de convidar.
   const sensitiveIntents = ['billing', 'cancelamento', 'infra_down'];
-  if (sensitiveIntents.includes(analysis.intent)) return false;
+  if (sensitiveIntents.includes(analysis.intent)) return null;
 
-  // Janela 1 — a conversa está sendo encerrada.
-  if (autoResolved) return true;
+  // Janela 2a — a conversa está sendo encerrada.
+  if (autoResolved) return COMMUNITY_INVITE;
 
-  // Janela 2 — dúvida geral resolvida, sem ser ticket de problema.
+  // Janela 2b — dúvida geral resolvida, sem ser ticket de problema.
   const generalIntents = ['duvida_geral', 'n8n', 'evolution', 'dominio'];
-  return analysis.resolved === true && generalIntents.includes(analysis.intent);
+  return analysis.resolved === true && generalIntents.includes(analysis.intent)
+    ? COMMUNITY_INVITE
+    : null;
 }
 
 // ─── Análise de intenção / sentimento / urgência ─────────────────────────────
@@ -1639,7 +1677,7 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
   // Starter: se o modelo tentou transferir mesmo proibido, troca o marcador
   // residual por orientação de autoatendimento.
   if (isStarterClient && reply.includes(TRANSFER_KEYWORD)) {
-    reply = `Não consegui resolver isso por aqui agora. Recomendo conferir nossa Central de ajuda em ${HELP_CENTER_URL}/ajuda ou pedir ajuda no nosso Discord: https://discord.gg/uDftSRtfKe`;
+    reply = `Não consegui resolver isso por aqui agora. Recomendo conferir nossa Central de ajuda em ${HELP_CENTER_URL}/ajuda ou pedir ajuda no nosso Discord: ${COMMUNITY_DISCORD}`;
     metadata = null;
   }
 
@@ -1648,20 +1686,25 @@ Esta resposta será revisada por um operador HUMANO antes de ser enviada ao clie
 
   // Convite às comunidades — anexado server-side depois da limpeza, para não
   // ser removido junto com os marcadores nem virar decisão do modelo.
-  if (
-    reply &&
-    shouldInviteToCommunity({
-      history,
-      analysis,
-      autoResolved: auto_resolved,
-      shouldHandoff: should_handoff,
-      isDraft,
-      hasQuickReplies: !!metadata?.quick_replies,
-      hasCredentialActions: !!metadata?.credential_actions,
-    })
-  ) {
-    reply = `${reply}\n\n${COMMUNITY_INVITE}`;
-    console.log(`[AI] Convite às comunidades anexado (intent=${analysis?.intent} resolved=${auto_resolved})`);
+  const invite = reply
+    ? communityInviteFor({
+        history,
+        analysis,
+        autoResolved: auto_resolved,
+        shouldHandoff: should_handoff,
+        isDraft,
+        isFirstMessage,
+        hasQuickReplies: !!metadata?.quick_replies,
+        hasCredentialActions: !!metadata?.credential_actions,
+      })
+    : null;
+
+  if (invite) {
+    reply = `${reply}\n\n${invite}`;
+    console.log(
+      `[AI] Convite às comunidades anexado (first=${isFirstMessage} ` +
+      `intent=${analysis?.intent} resolved=${auto_resolved})`,
+    );
   }
 
   return {

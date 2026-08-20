@@ -1,11 +1,11 @@
 import { useEffect, useState, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Inbox, Users, BookOpen, Zap, Settings, Cloud, LogOut, Moon, Sun, Circle, Bell, BellOff, LayoutGrid, PanelLeft, Flame, BarChart3 } from "lucide-react";
+import { Inbox, Users, BookOpen, Zap, Settings, Cloud, LogOut, Moon, Sun, Circle, Bell, BellOff, LayoutGrid, PanelLeft, Flame, BarChart3, UserCircle } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useAuthStore } from "@/stores/authStore";
 import { useTheme } from "@/lib/theme";
 import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -494,6 +494,11 @@ export function AppSidebar() {
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => updateStatus("offline")}>
                 <Circle className="h-3 w-3 fill-status-offline text-status-offline mr-2" /> Offline
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              {/* Nome exibido ao cliente mora aqui — ver aba "Minha conta" */}
+              <DropdownMenuItem onClick={() => navigate("/settings?tab=conta")}>
+                <UserCircle className="h-3 w-3 mr-2" /> Minha conta
               </DropdownMenuItem>
               <DropdownMenuItem onClick={async () => { await signOut(); navigate("/login", { replace: true }); }}>
                 <LogOut className="h-3 w-3 mr-2" /> Sair

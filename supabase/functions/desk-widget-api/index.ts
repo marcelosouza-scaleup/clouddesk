@@ -24,7 +24,7 @@ import {
   validateAndResendCredentials,
   type ContactInfoResult,
 } from '../_shared/contact-info.ts';
-import { runAiPipeline, detectPlanTag, type MessageMetadata } from '../_shared/ai-pipeline.ts';
+import { runAiPipeline, detectPlanTag, COMMUNITY_DISCORD, type MessageMetadata } from '../_shared/ai-pipeline.ts';
 import { broadcastToConversation } from '../_shared/broadcast.ts';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -115,7 +115,7 @@ const HANDOFF_MESSAGE = `Vou encaminhar sua solicitação para nossa equipe.
 - Fora do horário: fila para próximo dia útil
 
 📚 Central de ajuda: https://clouddesk.apps.cloudfy.cloud/ajuda
-💬 Discord: https://discord.gg/uDftSRtfKe`;
+💬 Discord: ${COMMUNITY_DISCORD}`;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

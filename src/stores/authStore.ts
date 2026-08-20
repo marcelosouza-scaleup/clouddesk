@@ -21,7 +21,12 @@ interface AuthState {
   fetchAgent: (authUserId: string) => Promise<Agent | null>;
   signOut: () => Promise<void>;
   updateStatus: (status: string) => Promise<void>;
+  updateName: (name: string) => Promise<boolean>;
 }
+
+/** Nome exibido: é o que o CLIENTE vê (pill "Conversa atribuída para X" no
+ *  widget e remetente do e-mail de resposta). Teto curto de propósito. */
+export const AGENT_NAME_MAX = 40;
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
@@ -65,5 +70,28 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       .from("desk_agents")
       .update({ status })
       .eq("id", agent.id);
+  },
+
+  // Sem update otimista aqui (ao contrário do status): este nome vai para o
+  // cliente, então só reflete na UI depois que o banco confirmou.
+  updateName: async (name) => {
+    const { agent } = get();
+    if (!agent) return false;
+
+    const clean = name.trim().slice(0, AGENT_NAME_MAX);
+    if (!clean) return false;
+
+    const { error } = await supabase
+      .from("desk_agents")
+      .update({ name: clean })
+      .eq("id", agent.id);
+
+    if (error) {
+      console.error("[auth] updateName:", error.message);
+      return false;
+    }
+
+    set((s) => ({ agent: s.agent ? { ...s.agent, name: clean } : null }));
+    return true;
   },
 }));
