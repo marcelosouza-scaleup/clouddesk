@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { notifyViewsChanged } from "@/lib/views-events";
+import { useAuthStore, AGENT_NAME_MAX } from "@/stores/authStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -28,6 +30,9 @@ import {
   Trash2,
   ChevronUp,
   ChevronDown,
+  UserCircle,
+  Mail,
+  MessageSquare,
   Settings as SettingsIcon,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -89,7 +94,16 @@ function formatMinutes(minutes: number): string {
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
+// A aba vive na URL (?tab=) para o menu do operador na sidebar conseguir abrir
+// "Minha conta" direto, e para o link ser compartilhável.
+const TABS = ["conta", "tags", "views", "sla"] as const;
+type TabValue = (typeof TABS)[number];
+
 export default function SettingsPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const param = searchParams.get("tab") as TabValue | null;
+  const tab: TabValue = param && TABS.includes(param) ? param : "conta";
+
   return (
     <div className="h-full flex flex-col p-6 max-w-3xl mx-auto w-full">
       <div className="flex items-center gap-2 mb-6">
@@ -97,8 +111,15 @@ export default function SettingsPage() {
         <h1 className="text-xl font-semibold text-foreground">Configurações</h1>
       </div>
 
-      <Tabs defaultValue="tags" className="flex-1">
+      <Tabs
+        value={tab}
+        onValueChange={(v) => setSearchParams({ tab: v }, { replace: true })}
+        className="flex-1"
+      >
         <TabsList className="mb-6">
+          <TabsTrigger value="conta" className="gap-1.5">
+            <UserCircle className="h-3.5 w-3.5" /> Minha conta
+          </TabsTrigger>
           <TabsTrigger value="tags" className="gap-1.5">
             <Tag className="h-3.5 w-3.5" /> Tags
           </TabsTrigger>
@@ -110,6 +131,9 @@ export default function SettingsPage() {
           </TabsTrigger>
         </TabsList>
 
+        <TabsContent value="conta">
+          <AccountTab />
+        </TabsContent>
         <TabsContent value="tags">
           <TagsTab />
         </TabsContent>
@@ -120,6 +144,124 @@ export default function SettingsPage() {
           <SlaTab />
         </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+// ─── Minha conta ──────────────────────────────────────────────────────────────
+
+const roleLabels: Record<string, string> = {
+  admin: "Administrador",
+  operator: "Operador",
+  viewer: "Somente leitura",
+};
+
+function AccountTab() {
+  const agent = useAuthStore((s) => s.agent);
+  const updateName = useAuthStore((s) => s.updateName);
+  const [name, setName] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  // O agente entra no store depois do fetch do login — sincroniza quando chegar
+  // (e quando o nome mudar em outra aba).
+  useEffect(() => { setName(agent?.name ?? ""); }, [agent?.name]);
+
+  if (!agent) {
+    return (
+      <div className="space-y-3">
+        <Skeleton className="h-4 w-64" />
+        <Skeleton className="h-24 rounded-xl" />
+      </div>
+    );
+  }
+
+  const trimmed = name.trim();
+  const dirty = trimmed !== agent.name;
+  const preview = trimmed || agent.name;
+
+  async function handleSave() {
+    if (!dirty || !trimmed) return;
+    setSaving(true);
+    const ok = await updateName(trimmed);
+    setSaving(false);
+    if (!ok) {
+      toast.error("Erro ao salvar seu nome");
+      return;
+    }
+    toast.success("Nome atualizado");
+  }
+
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground">
+        Seus dados de operador. O nome exibido é o único campo que o cliente vê.
+      </p>
+
+      <div className="rounded-xl border border-border bg-card p-4 space-y-4">
+        <div className="space-y-1.5">
+          <label htmlFor="agent-name" className="text-sm font-medium text-foreground">
+            Nome exibido
+          </label>
+          <Input
+            id="agent-name"
+            value={name}
+            maxLength={AGENT_NAME_MAX}
+            placeholder="Como você quer aparecer para o cliente"
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleSave()}
+          />
+          <p className="text-xs text-muted-foreground">
+            Use só o primeiro nome ou um apelido se preferir — não precisa ser seu nome completo.
+          </p>
+        </div>
+
+        <div className="rounded-lg bg-muted/40 p-3 space-y-2">
+          <p className="text-xs font-medium text-muted-foreground">
+            É assim que o cliente te vê:
+          </p>
+          <div className="flex items-start gap-2 text-xs text-foreground">
+            <MessageSquare className="h-3.5 w-3.5 mt-0.5 shrink-0 text-muted-foreground" />
+            <span>
+              No chat, ao assumir um chamado:{" "}
+              <span className="text-muted-foreground">“Conversa atribuída para </span>
+              <span className="font-medium">{preview}</span>
+              <span className="text-muted-foreground">”</span>
+            </span>
+          </div>
+          <div className="flex items-start gap-2 text-xs text-foreground">
+            <Mail className="h-3.5 w-3.5 mt-0.5 shrink-0 text-muted-foreground" />
+            <span>
+              No remetente das respostas por e-mail:{" "}
+              <span className="font-medium">{preview}</span>
+              <span className="text-muted-foreground"> — Cloudfy &lt;support@cloudfy.email&gt;</span>
+            </span>
+          </div>
+        </div>
+
+        <div className="flex justify-end">
+          <Button size="sm" onClick={handleSave} disabled={!dirty || !trimmed || saving}>
+            {saving ? "Salvando..." : "Salvar nome"}
+          </Button>
+        </div>
+      </div>
+
+      <Separator />
+
+      <div className="rounded-xl border border-border bg-card p-4 space-y-3">
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-sm text-muted-foreground">E-mail de acesso</span>
+          <span className="text-sm text-foreground truncate">{agent.email}</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-sm text-muted-foreground">Função</span>
+          <Badge variant="outline" className="text-xs">
+            {roleLabels[agent.role] ?? agent.role}
+          </Badge>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          E-mail e função são gerenciados pelo administrador da equipe.
+        </p>
+      </div>
     </div>
   );
 }
